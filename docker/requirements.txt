@@ -1,0 +1,45 @@
+# Deep Learning & Core Machine Learning
+torch>=2.2.0
+torchvision
+torchaudio
+pytorch-tabnet
+xgboost==1.7.6
+scikit-learn
+
+# Time-Series Analysis
+tslearn
+dtaidistance
+
+# Advanced Statistics & Survival Analysis
+statsmodels
+imbalanced-learn
+scikit-survival
+
+# Data Manipulation & Fast Processing Engine
+pandas
+numpy
+polars
+pyarrow
+duckdb
+
+# Data I/O & Formatting
+openpyxl
+tabulate
+
+# Visualization & Plotting
+matplotlib
+seaborn
+SciencePlots
+statannotations
+d3blocks
+
+# Dimensionality Reduction & Explainable AI (XAI)
+openTSNE
+umap-learn
+phate
+shap
+
+# Development Environment & Language Integration
+jupyterlab
+ipywidgets
+rpy2

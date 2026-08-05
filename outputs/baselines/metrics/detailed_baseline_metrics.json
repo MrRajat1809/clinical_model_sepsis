@@ -1,0 +1,126 @@
+{
+    "LR_Static": {
+        "model": "LR_Static",
+        "Execution_Time_sec": 0.3,
+        "Train_Size": 11067,
+        "Test_Size": 1953,
+        "Test_Positives": 314,
+        "Test_Negatives": 1639,
+        "AUROC": 0.6601032554416045,
+        "AUROC_95CI": [
+            0.6332446081938528,
+            0.6930792777081581
+        ],
+        "AUPRC": 0.3018162616798685,
+        "AUPRC_95CI": [
+            0.259785088936485,
+            0.3521369970597535
+        ],
+        "Brier": 0.22643771801967355,
+        "Brier_95CI": [
+            0.22105000966241126,
+            0.23182325023380237
+        ],
+        "Sensitivity": 0.5222929936305732,
+        "Specificity": 0.699816961561928,
+        "PPV": 0.25,
+        "NPV": 0.8843484965304549,
+        "F1": 0.33814432989690724,
+        "Balanced_Accuracy": 0.6110549775962506,
+        "Calibration_Slope": 0.8608505657414943,
+        "Calibration_Intercept": -1.6576541679607264
+    },
+    "LR_Combined": {
+        "model": "LR_Combined",
+        "Execution_Time_sec": 0.7,
+        "Train_Size": 11067,
+        "Test_Size": 1953,
+        "Test_Positives": 314,
+        "Test_Negatives": 1639,
+        "AUROC": 0.8756854226011666,
+        "AUROC_95CI": [
+            0.8570428949601612,
+            0.8934235782822741
+        ],
+        "AUPRC": 0.5792719234205947,
+        "AUPRC_95CI": [
+            0.5240185788175047,
+            0.6356107634972702
+        ],
+        "Brier": 0.1457091684537705,
+        "Brier_95CI": [
+            0.1380403811126459,
+            0.1555389073867295
+        ],
+        "Sensitivity": 0.8057324840764332,
+        "Specificity": 0.7858450274557657,
+        "PPV": 0.41887417218543044,
+        "NPV": 0.9547813194959229,
+        "F1": 0.55119825708061,
+        "Balanced_Accuracy": 0.7957887557660994,
+        "Calibration_Slope": 0.8182007620535118,
+        "Calibration_Intercept": -1.6377014155886858
+    },
+    "RandomForest_Combined": {
+        "model": "RandomForest_Combined",
+        "Execution_Time_sec": 6.4,
+        "Train_Size": 11067,
+        "Test_Size": 1953,
+        "Test_Positives": 314,
+        "Test_Negatives": 1639,
+        "AUROC": 0.8792869273248018,
+        "AUROC_95CI": [
+            0.8587318994924671,
+            0.8971090468510643
+        ],
+        "AUPRC": 0.5955467346340736,
+        "AUPRC_95CI": [
+            0.544892653317244,
+            0.6521149419534338
+        ],
+        "Brier": 0.094271006656426,
+        "Brier_95CI": [
+            0.08787392150537635,
+            0.10233687393753199
+        ],
+        "Sensitivity": 0.2484076433121019,
+        "Specificity": 0.9847467968273338,
+        "PPV": 0.7572815533980582,
+        "NPV": 0.8724324324324324,
+        "F1": 0.37410071942446044,
+        "Balanced_Accuracy": 0.6165772200697178,
+        "Calibration_Slope": 1.364528662593106,
+        "Calibration_Intercept": 0.47504649675529026
+    },
+    "XGBoost_Combined": {
+        "model": "XGBoost_Combined",
+        "Execution_Time_sec": 5.1,
+        "Train_Size": 11067,
+        "Test_Size": 1953,
+        "Test_Positives": 314,
+        "Test_Negatives": 1639,
+        "AUROC": 0.8771777105039192,
+        "AUROC_95CI": [
+            0.855041515533432,
+            0.8957963772271365
+        ],
+        "AUPRC": 0.6179286949707231,
+        "AUPRC_95CI": [
+            0.5657120052835606,
+            0.6751080936614338
+        ],
+        "Brier": 0.1092939844251931,
+        "Brier_95CI": [
+            0.10097510271577798,
+            0.11831055041311715
+        ],
+        "Sensitivity": 0.6656050955414012,
+        "Specificity": 0.87614399023795,
+        "PPV": 0.5072815533980582,
+        "NPV": 0.9318624269954575,
+        "F1": 0.5757575757575758,
+        "Balanced_Accuracy": 0.7708745428896756,
+        "Calibration_Slope": 0.9258726453702095,
+        "Calibration_Intercept": -0.9815348127233603
+    }
+}

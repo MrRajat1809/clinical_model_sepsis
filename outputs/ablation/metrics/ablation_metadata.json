@@ -1,0 +1,5 @@
+{
+    "n_bootstraps": 1000,
+    "random_seed": 42,
+    "champion_used": "Static + Aggregated (Champion)"
+}

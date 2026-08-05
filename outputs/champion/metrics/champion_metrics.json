@@ -1,0 +1,37 @@
+{
+    "model": "Champion_XGBoost_Static_Aggregated",
+    "hyperparameters": {
+        "n_estimators": 700,
+        "learning_rate": 0.0167319253916721,
+        "max_depth": 8,
+        "subsample": 0.9489561387689541,
+        "colsample_bytree": 0.564609327090762,
+        "min_child_weight": 15,
+        "gamma": 1.741366192238648
+    },
+    "metrics": {
+        "AUROC": 0.8893064358801973,
+        "AUROC_95CI": [
+            0.8712502386260242,
+            0.9065790325776959
+        ],
+        "AUPRC": 0.6528566856758637,
+        "AUPRC_95CI": [
+            0.5969619911214926,
+            0.7057213136212174
+        ],
+        "Brier": 0.0976458652112233,
+        "Brier_95CI": [
+            0.08999534731180571,
+            0.10631317530236375
+        ],
+        "Sensitivity": 0.6369426751592356,
+        "Specificity": 0.900549115314216,
+        "PPV": 0.5509641873278237,
+        "NPV": 0.9283018867924528,
+        "F1": 0.5908419497784343,
+        "Balanced_Accuracy": 0.7687458952367259,
+        "Calibration_Slope": 0.9029262800743426,
+        "Calibration_Intercept": -0.7659411105077165
+    }
+}

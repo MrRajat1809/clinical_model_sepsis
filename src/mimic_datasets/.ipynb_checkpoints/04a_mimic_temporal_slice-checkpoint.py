@@ -1,0 +1,208 @@
+"""
+04a_mimic_temporal_slice.py
+
+Extracts the critical temporal window (-48 to +48 hours) around the Suspected Infection Time (SIT).
+Extracts vitals, labs, vasopressor administration, urine output, and mechanical ventilation status.
+
+[FIX APPLIED]: Reverted artificial NEQ grouping; raw vasopressors (Norepi, Epi, Dopa, 
+Dobutamine, Vasopressin, Phenylephrine) are now passed through natively to support strict SOFA.
+[FIX APPLIED]: Added Urine Output extraction from the `outputevents` table.
+[FIX APPLIED]: Augmented Mechanical Ventilation extraction to include both `procedureevents` 
+and `chartevents` (e.g., PEEP charting) to prevent false negatives.
+"""
+
+import time
+from pathlib import Path
+
+import duckdb
+
+# ==========================================
+# CONFIGURATION
+# ==========================================
+BASE_DIR = Path(__file__).resolve().parents[2]
+MIMIC_DIR = BASE_DIR / "data" / "raw" / "mimiciv" / "3.1"
+PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
+
+# ==========================================
+# MAIN EXECUTION
+# ==========================================
+def main():
+    print("Executing MIMIC-IV temporal extraction pipeline...")
+    start_time = time.time()
+    
+    cohort_file = PROCESSED_DIR / "sepsis_phenotype_cohort.parquet"
+    out_file = PROCESSED_DIR / "sepsis_temporal_data.parquet"
+    
+    if not cohort_file.exists():
+        print(f"[ERROR] Cohort file not found at: {cohort_file}")
+        return
+        
+    print("\n[*] Initializing in-memory DuckDB...")
+    con = duckdb.connect(database=':memory:')
+    con.execute("PRAGMA threads=4;")
+    
+    # ItemID Definitions
+    vital_itemids = "220045, 220210, 220181, 220052, 223761, 223762, 220739, 223900, 223901, 223835, 220277"
+    
+    lab_itemids = (
+        "50821, "        # PaO2
+        "50885, "        # tBil
+        "50912, "        # Scr
+        "51265, "        # Platelets
+        "51301, 51300, " # WBC
+        "51222, "        # Hemoglobin
+        "51006, "        # BUN
+        "50820, "        # pH
+        "50813, "        # Lactate
+        "51274, "        # PT
+        "51275, "        # APTT
+        "50862, "        # Albumin
+        "50971, 50822, " # Potassium
+        "50983, 50824, " # Sodium
+        "50931, 50809, " # Glucose
+        "50902, 50806, " # Chloride
+        "50818"          # PaCO2
+    )
+    
+    # Norepi(221906), Epi(221289), Dopa(221662), Dobutamine(221653), Vaso(222315), Phenylephrine(221749)
+    vaso_itemids = "221906, 221289, 221662, 221653, 222315, 221749"
+    vent_proc_itemids = "225792, 225794"
+    vent_chart_itemids = "220339, 223849, 223848" # PEEP, Vent Mode, Vent Type
+    uo_itemids = "226559, 226560, 226561, 226584, 226563, 226564, 226565, 226567, 226557, 226558"
+    
+    query = f"""
+    WITH cohort AS (
+        SELECT subject_id, hadm_id, stay_id, suspected_infection_time 
+        FROM '{cohort_file}'
+    ),
+    sliced_vitals AS (
+        SELECT 
+            c.stay_id,
+            'vital' AS data_type,
+            c.charttime AS event_time,
+            c.itemid,
+            -- Inline standardization: Fahrenheit to Celsius
+            CASE 
+                WHEN c.itemid = 223761 THEN (c.valuenum - 32.0) * 5.0 / 9.0
+                ELSE c.valuenum
+            END AS valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/icu/chartevents.csv.gz') c
+        INNER JOIN cohort p ON c.stay_id = p.stay_id
+        WHERE c.charttime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND c.charttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND c.valuenum IS NOT NULL
+          AND c.itemid IN ({vital_itemids})
+    ),
+    sliced_labs AS (
+        SELECT 
+            p.stay_id,
+            'lab' AS data_type,
+            l.charttime AS event_time,
+            l.itemid,
+            l.valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/hosp/labevents.csv.gz') l
+        INNER JOIN cohort p ON l.subject_id = p.subject_id AND l.hadm_id = p.hadm_id
+        WHERE l.charttime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND l.charttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND l.valuenum IS NOT NULL
+          AND l.itemid IN ({lab_itemids})
+    ),
+    sliced_vasos AS (
+        SELECT 
+            p.stay_id,
+            'vaso' AS data_type,
+            i.starttime AS event_time,
+            i.itemid,
+            -- Normalize rate to mcg/kg/min if patient weight is used
+            CASE 
+                WHEN i.rateuom = 'mcg/min' AND i.patientweight > 0 THEN (i.rate / i.patientweight)
+                ELSE i.rate
+            END AS valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/icu/inputevents.csv.gz') i
+        INNER JOIN cohort p ON i.stay_id = p.stay_id
+        WHERE i.starttime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND i.starttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND i.rate IS NOT NULL
+          AND i.rate > 0
+          AND i.itemid IN ({vaso_itemids})
+          AND i.rateuom IN ('mcg/min', 'mcg/kg/min', 'units/hour', 'units/min') 
+    ),
+    sliced_uo AS (
+        SELECT 
+            o.stay_id,
+            'uo' AS data_type,
+            o.charttime AS event_time,
+            o.itemid,
+            o.value AS valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/icu/outputevents.csv.gz') o
+        INNER JOIN cohort p ON o.stay_id = p.stay_id
+        WHERE o.charttime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND o.charttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND o.value IS NOT NULL
+          AND o.itemid IN ({uo_itemids})
+    ),
+    sliced_vents AS (
+        -- Source 1: Procedure Events
+        SELECT 
+            p.stay_id,
+            'vent' AS data_type,
+            CASE 
+                WHEN v.starttime < (p.suspected_infection_time - INTERVAL 48 HOUR) 
+                THEN (p.suspected_infection_time - INTERVAL 48 HOUR)
+                ELSE v.starttime
+            END AS event_time,
+            888888 AS itemid, -- Standardized Ventilation ID
+            1.0 AS valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/icu/procedureevents.csv.gz') v
+        INNER JOIN cohort p ON v.stay_id = p.stay_id
+        WHERE v.starttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND v.endtime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND v.itemid IN ({vent_proc_itemids})
+          
+        UNION ALL
+        
+        -- Source 2: Chart Events (PEEP, Vent Modes)
+        SELECT 
+            c.stay_id,
+            'vent' AS data_type,
+            c.charttime AS event_time,
+            888888 AS itemid, -- Standardized Ventilation ID
+            1.0 AS valuenum
+        FROM read_csv_auto('{MIMIC_DIR}/icu/chartevents.csv.gz') c
+        INNER JOIN cohort p ON c.stay_id = p.stay_id
+        WHERE c.charttime >= (p.suspected_infection_time - INTERVAL 48 HOUR)
+          AND c.charttime <= (p.suspected_infection_time + INTERVAL 48 HOUR)
+          AND c.itemid IN ({vent_chart_itemids})
+          AND c.valuenum IS NOT NULL
+    )
+    SELECT * FROM sliced_vitals
+    UNION ALL
+    SELECT * FROM sliced_labs
+    UNION ALL
+    SELECT * FROM sliced_vasos
+    UNION ALL
+    SELECT * FROM sliced_uo
+    UNION ALL
+    SELECT * FROM sliced_vents
+    """
+    
+    print("[*] Streaming multi-table temporal slice (-48h to +48h from SIT)...")
+    print("    - Extracting targeted vitals (chartevents)")
+    print("    - Extracting targeted labs (labevents)")
+    print("    - Extracting raw vasopressor therapies (inputevents)")
+    print("    - Extracting urine output (outputevents)")
+    print("    - Extracting mechanical ventilation statuses (procedureevents + chartevents)")
+    
+    # Execute and write directly to Parquet
+    con.execute(f"COPY ({query}) TO '{out_file}' (FORMAT PARQUET)")
+    
+    # Verify the output
+    count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
+    elapsed = time.time() - start_time
+    
+    print(f"\n[+] Success! Temporal slice extracted in {elapsed:.2f} seconds.")
+    print(f"    -> Total Time-Series Datapoints Retrieved: {count}")
+    print(f"    -> Output saved successfully to: {out_file.relative_to(BASE_DIR)}")
+
+if __name__ == "__main__":
+    main()
