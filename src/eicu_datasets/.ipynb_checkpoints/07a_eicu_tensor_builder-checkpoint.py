@@ -2,18 +2,15 @@
 07a_eicu_tensor_builder.py
 
 Phase 9: External Validation (eICU Tensor Generation)
-Reshapes the cleaned eICU temporal extraction into a dense 3D tensor [Patients, 24 Steps, Features].
-Creates parallel static feature vectors and mortality label arrays.
+Reshapes the cleaned eICU temporal extractions into a dense 3D tensor [Patients, 24 Steps, Features].
 
-[FIX]: Aligns eICU's minute-based offsets into the exact 24x 1-hour bin structure.
-[FIX]: Forces the exact 30-feature temporal order and 8-feature static order from MIMIC-IV, 
-       injecting NaNs or dummy variables (e.g., admission_type) where eICU lacks native data, 
-       ensuring the locked XGBoost model receives the exact matrix shape it expects.
+[UPGRADE]: Integrates standalone GCS, FiO2, and Audited Vasopressor timelines.
+[FIX]: Corrects the NEQ calculation (Phenylephrine / 2.2) to match MIMIC-IV pharmacology.
+[FIX]: Forces the exact 30-feature temporal order and 8-feature static order from MIMIC-IV.
 """
 
 import time
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -26,34 +23,38 @@ PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 TENSOR_DIR = PROCESSED_DIR / "tensors"
 
 def main():
-    print("[*] Executing eICU Tensor Generation Pipeline...")
+    print("[*] Executing Upgraded eICU Tensor Generation Pipeline...")
     start_time = time.time()
     
     TENSOR_DIR.mkdir(parents=True, exist_ok=True)
     
     cohort_file = PROCESSED_DIR / "eicu_final_sepsis3_cohort.parquet"
-    temporal_file = PROCESSED_DIR / "eicu_sepsis_temporal_data_cleaned.parquet"
     
-    # 3D Tensor Outputs
+    # 4 Data Streams
+    temporal_file = PROCESSED_DIR / "eicu_sepsis_temporal_data_cleaned.parquet"
+    gcs_file = PROCESSED_DIR / "eicu_gcs_timeline.parquet"
+    fio2_file = PROCESSED_DIR / "eicu_fio2_timeline.parquet"
+    pressor_file = PROCESSED_DIR / "eicu_standardized_pressors.parquet"
+    
+    # Outputs
     out_tensor = TENSOR_DIR / "eicu_sepsis_tensor_raw.npy"
     id_file = TENSOR_DIR / "eicu_sepsis_tensor_stay_ids.npy"
     feature_file = TENSOR_DIR / "eicu_sepsis_tensor_features.npy"
     policy_file = TENSOR_DIR / "aggregation_policy.npy"
     mask_file = TENSOR_DIR / "eicu_sepsis_tensor_mask.npy"
     
-    # Static & Label Outputs
     static_file = TENSOR_DIR / "eicu_sepsis_tensor_static.npy"
     static_feature_file = TENSOR_DIR / "eicu_sepsis_tensor_static_features.npy"
     label_file = TENSOR_DIR / "eicu_sepsis_tensor_labels.npy"
     
     if not temporal_file.exists():
-        print(f"[ERROR] Cleaned temporal data not found at: {temporal_file}")
+        print(f"[ERROR] Cleaned temporal data not found.")
         return
 
     # ---------------------------------------------------------
-    # 1. LOAD DATA & MAP CHANNELS
+    # 1. LOAD DATA & CONCATENATE TIMELINES
     # ---------------------------------------------------------
-    print("    -> Loading cohort demographics and mapping clinical features...")
+    print("    -> Loading cohort and stacking temporal data streams...")
     
     df_cohort = pl.read_parquet(cohort_file).select([
         "stay_id", "sepsis_onset_offset", "age", "gender", "race",
@@ -61,15 +62,33 @@ def main():
         "baseline_sofa", "baseline_pf_ratio", "hospital_expire_flag"
     ])
     
-    # Convert gender to binary (M=1, F=0) and inject dummy admission_type
     df_cohort = df_cohort.with_columns(
-        pl.when(pl.col("gender") == "M").then(1).otherwise(0).alias("gender"),
+        pl.when(pl.col("gender").str.to_lowercase().str.starts_with("m")).then(1).otherwise(0).alias("gender"),
         pl.lit("UNKNOWN").alias("admission_type")
     )
     
-    df_vitals = pl.scan_parquet(temporal_file)
+    # Load all 4 temporal streams
+    df_vitals = pl.read_parquet(temporal_file).select(["stay_id", "event_time", "itemid", "valuenum"])
     
-    # Map eICU string names to MIMIC feature slots
+    df_gcs = pl.read_parquet(gcs_file).select(["stay_id", "event_time", "itemid", "valuenum"]) if gcs_file.exists() else pl.DataFrame(schema=df_vitals.schema)
+    df_fio2 = pl.read_parquet(fio2_file).select(["stay_id", "event_time", "itemid", "valuenum"]) if fio2_file.exists() else pl.DataFrame(schema=df_vitals.schema)
+    
+    # Pressors require standardizing column names before concat
+    if pressor_file.exists():
+        df_pressors = pl.read_parquet(pressor_file).select([
+            "stay_id", "event_time", 
+            pl.col("drug_type").alias("itemid"), 
+            pl.col("standardized_rate").alias("valuenum")
+        ])
+    else:
+        df_pressors = pl.DataFrame(schema=df_vitals.schema)
+
+    # Master Temporal Dataframe
+    df_all_temporal = pl.concat([df_vitals, df_gcs, df_fio2, df_pressors])
+
+    # ---------------------------------------------------------
+    # 2. FEATURE MAPPING
+    # ---------------------------------------------------------
     feature_map = {
         "heartrate": "hr", "systemicmean": "map", "noninvasivemean": "map", 
         "respiration": "rr", "temperature": "temp_c", "sao2": "spo2",
@@ -78,8 +97,12 @@ def main():
         "ph": "ph", "lactate": "lactate", "pt": "pt", "ptt": "aptt", 
         "albumin": "albumin", "potassium": "potassium", "sodium": "sodium", 
         "glucose": "glucose", "chloride": "chloride", "paco2": "paco2", "pao2": "pao2",
-        "vasopressor": "norepinephrine", # Route proxy pressor into NE slot
-        "888888": "vent", "urine_output": "urine_output"
+        "888888": "vent", "urine_output": "urine_output",
+        # Pass-throughs for the canonical data streams we just built
+        "gcs_motor": "gcs_motor", "gcs_verbal": "gcs_verbal", "gcs_eye": "gcs_eye",
+        "fio2": "fio2", 
+        "norepinephrine": "norepinephrine", "epinephrine": "epinephrine", 
+        "vasopressin": "vasopressin", "dopamine": "dopamine", "phenylephrine": "phenylephrine"
     }
     
     mapping_df = pl.DataFrame({
@@ -88,13 +111,12 @@ def main():
     }, schema={"itemid": pl.Utf8, "feature": pl.Utf8})
 
     # ---------------------------------------------------------
-    # 2. TEMPORAL BINNING (24 UNIFORM 1-HOUR BINS)
+    # 3. TEMPORAL BINNING (24 UNIFORM 1-HOUR BINS)
     # ---------------------------------------------------------
     print("    -> Filtering temporal window and enforcing 24x 1-hour bins...")
-    df_joined = df_vitals.join(df_cohort.lazy().select(["stay_id", "sepsis_onset_offset"]), on="stay_id")
-    df_joined = df_joined.join(mapping_df.lazy(), on="itemid")
+    df_joined = df_all_temporal.lazy().join(df_cohort.lazy().select(["stay_id", "sepsis_onset_offset"]), on="stay_id")
+    df_joined = df_joined.join(mapping_df.lazy(), on="itemid", how="inner")
     
-    # Convert minutes to hours and bin
     df_window = df_joined.with_columns(
         ((pl.col("event_time") - pl.col("sepsis_onset_offset")) / 60.0).alias("hours_from_onset")
     ).filter(
@@ -106,7 +128,7 @@ def main():
     ).collect()
 
     # ---------------------------------------------------------
-    # 3. CLINICAL AGGREGATION
+    # 4. CLINICAL AGGREGATION
     # ---------------------------------------------------------
     print("    -> Applying physiological aggregation logic (Mean/Max/Min/Sum) per bin...")
     
@@ -138,7 +160,7 @@ def main():
     ).to_pandas()
 
     # ---------------------------------------------------------
-    # 4. FEATURE ENGINEERING (P/F RATIO & NEQ)
+    # 5. FEATURE ENGINEERING (P/F RATIO & NEQ)
     # ---------------------------------------------------------
     print("    -> Engineering PaO2/FiO2 ratio and validated NEQ conversion...")
     
@@ -154,16 +176,17 @@ def main():
             df_wide[p] = np.nan
 
     has_pressor = df_wide[pressors].notna().any(axis=1)
+    
+    # THE PHARMACOLOGICAL FIX: Phenylephrine divided by 2.2
     df_wide.loc[has_pressor, "neq"] = (
         df_wide["norepinephrine"].fillna(0) +
         df_wide["epinephrine"].fillna(0) +
-        (df_wide["phenylephrine"].fillna(0) / 10.0) +
+        (df_wide["phenylephrine"].fillna(0) / 2.2) + 
         (df_wide["dopamine"].fillna(0) / 100.0) +
         (df_wide["vasopressin"].fillna(0) * 2.5)
     )
     df_wide.loc[~has_pressor, "neq"] = np.nan
 
-    # Force Exact MIMIC-IV Column Shapes
     FEATURE_ORDER = [
         "hr", "map", "rr", "temp_c", "spo2", 
         "gcs_eye", "gcs_verbal", "gcs_motor", 
@@ -178,7 +201,7 @@ def main():
             df_wide[f] = np.nan
 
     # ---------------------------------------------------------
-    # 5. TENSOR RESHAPING
+    # 6. TENSOR RESHAPING
     # ---------------------------------------------------------
     print("    -> Reshaping data into dense 3D Tensor format...")
     stay_ids = sorted(df_cohort["stay_id"].to_list())
@@ -194,7 +217,7 @@ def main():
     print(f"       - Missingness Rate  : {missingness_mask.mean() * 100:.2f}%")
 
     # ---------------------------------------------------------
-    # 6. STATIC & LABEL EXTRACTION
+    # 7. STATIC & LABEL EXTRACTION
     # ---------------------------------------------------------
     print("    -> Extracting parallel 2D Static Context and 1D Labels...")
     df_static = df_cohort.to_pandas().set_index("stay_id").reindex(stay_ids)
@@ -215,7 +238,7 @@ def main():
     print(f"       - 1D Target Shape   : {y_labels.shape}")
 
     # ---------------------------------------------------------
-    # 7. SERIALIZATION
+    # 8. SERIALIZATION
     # ---------------------------------------------------------
     np.save(out_tensor, X_3d)
     np.save(id_file, np.array(stay_ids))

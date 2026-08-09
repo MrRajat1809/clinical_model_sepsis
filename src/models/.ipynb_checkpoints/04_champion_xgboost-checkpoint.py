@@ -209,7 +209,15 @@ def main():
         
         for train_idx, val_idx in cv.split(X_train_val, y_train_val):
             model = XGBClassifier(**params)
-            model.fit(X_train_val[train_idx], y_train_val[train_idx])
+            
+            # Added eval_set and early_stopping_rounds
+            model.fit(
+                X_train_val[train_idx], y_train_val[train_idx],
+                eval_set=[(X_train_val[val_idx], y_train_val[val_idx])],
+                early_stopping_rounds=50,
+                verbose=False
+            )
+            
             preds = model.predict_proba(X_train_val[val_idx])[:, 1]
             fold_scores.append(roc_auc_score(y_train_val[val_idx], preds))
             
