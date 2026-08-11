@@ -1,27 +1,29 @@
 """
 07_shap_interpretation.py
 
-Phase 8: Model Interpretation (Consensus SHAP)
-Explains the predictions of the Champion XGBoost model using SHAP.
-- Computes exact SHAP values on the hold-out test set for local explanations (Beeswarm).
-- Runs 100-iteration Consensus SHAP (bootstrapping the test set) to generate 
-  robust 95% Confidence Intervals for global feature importance.
-- Exports all raw arrays and summary tables for downstream visualization scripts.
+Phase 8: Model Interpretation (True 50-Model Consensus SHAP)
+Unlocks the Champion XGBoost black box to extract clinical physiological rules.
+1. Reconstructs the exact MIMIC-IV hold-out train and test feature spaces.
+2. Extracts hyperparameters from the locked Champion model.
+3. Trains 50 independent XGBoost models with different initialization seeds.
+4. Computes and averages exact SHAP values across all 50 runs for robust 
+   Consensus SHAP global feature importance.
+5. Exports data for publication-quality plotting.
 """
 
+import os
 import time
 import json
 import joblib
-import os
+import warnings
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import shap
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
 
-import warnings
 warnings.filterwarnings("ignore")
 
 # ==========================================
@@ -29,23 +31,25 @@ warnings.filterwarnings("ignore")
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parents[2]
 
+# Input Tensors & Cohort
 TENSOR_DIR = BASE_DIR / "data" / "processed" / "mimiciv" / "tensors"
 COHORT_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 SPLITS_DIR = BASE_DIR / "outputs" / "baselines" / "train_test_split"
 
-# Inputs
+# Input Models & Features
 CHAMPION_MODEL_FILE = BASE_DIR / "outputs" / "champion" / "models" / "champion_xgboost.joblib"
 FEAT_NAMES_FILE = BASE_DIR / "outputs" / "champion" / "feature_names" / "champion_features.json"
 
-# Outputs
+# Output SHAP Data
 OUT_SHAP_DIR = BASE_DIR / "outputs" / "shap"
 OUT_SHAP_DATA = OUT_SHAP_DIR / "data"
 OUT_SHAP_DATA.mkdir(parents=True, exist_ok=True)
 
-RANDOM_STATE = 42
-N_BOOTSTRAPS = 100
+N_MODELS = 50
+BASE_SEED = 42
 
 def set_seed(seed):
+    """Ensures absolute reproducibility."""
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
@@ -53,124 +57,133 @@ def set_seed(seed):
 # MAIN EXECUTION
 # ==========================================
 def main():
-    set_seed(RANDOM_STATE)
-    print("[*] Initiating Phase 8: Consensus SHAP Interpretation...")
+    set_seed(BASE_SEED)
+    print(f"[*] Initiating Phase 8: True {N_MODELS}-Model Consensus SHAP Interpretation...")
     start_time = time.time()
     
     # ---------------------------------------------------------
-    # 1. LOAD CHAMPION MODEL & FEATURE NAMES
+    # 1. LOAD CHAMPION MODEL & METADATA
     # ---------------------------------------------------------
     if not CHAMPION_MODEL_FILE.exists() or not FEAT_NAMES_FILE.exists():
-        print("[ERROR] Champion model or feature names not found. Run Phase 4 first.")
+        print(f"[ERROR] Required files not found. Check: {CHAMPION_MODEL_FILE}")
         return
         
-    print("    -> Loading locked Champion XGBoost model...")
-    champion_xgb = joblib.load(CHAMPION_MODEL_FILE)
+    print("    -> Loading locked Champion XGBoost model to extract hyperparameters...")
+    base_champion = joblib.load(CHAMPION_MODEL_FILE)
     
     with open(FEAT_NAMES_FILE, "r") as f:
         feature_names = json.load(f)
 
     # ---------------------------------------------------------
-    # 2. RECONSTRUCT TEST FEATURE SPACE
+    # 2. RECONSTRUCT TRAIN & TEST FEATURE SPACES
     # ---------------------------------------------------------
-    print("    -> Reconstructing the exact test feature space...")
+    print("    -> Reconstructing and standardizing the exact MIMIC train/test sets...")
     X_imputed = np.load(TENSOR_DIR / "sepsis_imputed_tensor.npy")
     stay_ids = np.load(TENSOR_DIR / "sepsis_tensor_stay_ids.npy")
     
-    df_cohort = pl.read_parquet(COHORT_DIR / "final_sepsis3_cohort.parquet").to_pandas()
+    df_cohort = pd.read_parquet(COHORT_DIR / "final_sepsis3_cohort.parquet")
     df_cohort = pd.DataFrame({"stay_id": stay_ids}).merge(df_cohort, on="stay_id", how="left")
     
-    idx_train_val = np.load(SPLITS_DIR / "train_indices.npy")
+    idx_train = np.load(SPLITS_DIR / "train_indices.npy")
     idx_test = np.load(SPLITS_DIR / "test_indices.npy")
+    
+    y = df_cohort["hospital_expire_flag"].values
+    y_train = y[idx_train]
 
     # Static Features
-    static_cols = [col for col in ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"] if col in df_cohort.columns]
-    df_static = df_cohort[static_cols].copy()
+    static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    df_static = df_cohort[[c for c in static_cols if c in df_cohort.columns]].copy()
     if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
-        
-    scaler_static = StandardScaler().fit(df_static.fillna(0).values[idx_train_val])
-    X_static = scaler_static.transform(df_static.fillna(0).values)
+        df_static["gender"] = (df_static["gender"].astype(str).str.upper() == "M").astype(int)
+    X_static = df_static.fillna(0).values
 
-    # Aggregated Features
-    X_mean, X_min = np.mean(X_imputed, axis=1), np.min(X_imputed, axis=1)
-    X_max, X_std = np.max(X_imputed, axis=1), np.std(X_imputed, axis=1)
+    # Temporal Aggregations
+    X_mean = np.mean(X_imputed, axis=1)
+    X_min = np.min(X_imputed, axis=1)
+    X_max = np.max(X_imputed, axis=1)
+    X_std = np.std(X_imputed, axis=1)
     
-    scaler_agg = StandardScaler().fit(np.concatenate([X_mean, X_min, X_max, X_std], axis=1)[idx_train_val])
-    X_temporal_agg = scaler_agg.transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
+    X_fused = np.concatenate([X_static, X_mean, X_min, X_max, X_std], axis=1)
 
-    X_fused = np.concatenate([X_static, X_temporal_agg], axis=1)
-    X_test = X_fused[idx_test]
-    df_test_features = pd.DataFrame(X_test, columns=feature_names)
+    # Standardize strictly using the Training set distribution
+    scaler = StandardScaler().fit(X_fused[idx_train])
+    X_train_scaled = scaler.transform(X_fused[idx_train])
+    X_test_scaled = scaler.transform(X_fused[idx_test])
+    
+    df_test_features = pd.DataFrame(X_test_scaled, columns=feature_names)
 
     # ---------------------------------------------------------
-    # 3. EXACT SHAP (FOR BEESWARM / LOCAL EXPLANATIONS)
+    # 3. 50-MODEL CONSENSUS SHAP LOOP
     # ---------------------------------------------------------
-    print("    -> Initializing TreeExplainer and computing Exact SHAP values...")
-    explainer = shap.TreeExplainer(champion_xgb)
+    print(f"    -> Training {N_MODELS} independent XGBoost models for Consensus SHAP...")
     
-    # These exact values are what you will use for the Beeswarm plot
-    shap_values_exact = explainer.shap_values(df_test_features)
+    test_size = len(X_test_scaled)
+    n_features = len(feature_names)
     
-    np.save(OUT_SHAP_DATA / "shap_values_exact_test.npy", shap_values_exact)
-    df_test_features.to_csv(OUT_SHAP_DATA / "test_features_scaled.csv", index=False)
-
-    # ---------------------------------------------------------
-    # 4. CONSENSUS SHAP (100-ITERATION BOOTSTRAP)
-    # ---------------------------------------------------------
-    print(f"    -> Running Consensus SHAP ({N_BOOTSTRAPS} iterations) for Confidence Intervals...")
-    rng = np.random.default_rng(RANDOM_STATE)
-    test_size = len(X_test)
+    # To store raw SHAP values from all 50 models to compute CIs and Beeswarm data
+    all_shap_values = np.zeros((N_MODELS, test_size, n_features))
     
-    # Store the Mean Absolute SHAP for each feature across all iterations
-    # Shape: (N_BOOTSTRAPS, N_FEATURES)
-    bootstrap_global_importance = np.zeros((N_BOOTSTRAPS, len(feature_names)))
-
-    for i in range(N_BOOTSTRAPS):
+    for i in range(N_MODELS):
         if (i + 1) % 10 == 0:
-            print(f"       - Completed {i + 1}/{N_BOOTSTRAPS} iterations...")
+            print(f"       - Completed {i + 1}/{N_MODELS} model runs...")
             
-        idx = rng.choice(test_size, size=test_size, replace=True)
-        X_boot = X_test[idx]
+        current_seed = BASE_SEED + i
         
-        # TreeExplainer is extremely fast, allowing us to rapidly recalculate
-        shap_boot = explainer.shap_values(X_boot)
-        bootstrap_global_importance[i, :] = np.abs(shap_boot).mean(axis=0)
+        # Clone model to preserve optimal hyperparams but set a new seed
+        model_clone = clone(base_champion)
+        model_clone.set_params(random_state=current_seed)
+        
+        # Suppress XGBoost output during the loop
+        model_clone.fit(X_train_scaled, y_train, verbose=False)
+        
+        # Compute exact SHAP values for the test set
+        explainer = shap.TreeExplainer(model_clone)
+        shap_values = explainer.shap_values(X_test_scaled)
+        
+        all_shap_values[i] = shap_values
 
     # ---------------------------------------------------------
-    # 5. AGGREGATE & EXPORT
+    # 4. AGGREGATE & EXPORT
     # ---------------------------------------------------------
     print("    -> Aggregating Consensus metrics and exporting...")
     
-    mean_importance = np.mean(bootstrap_global_importance, axis=0)
-    lower_ci = np.percentile(bootstrap_global_importance, 2.5, axis=0)
-    upper_ci = np.percentile(bootstrap_global_importance, 97.5, axis=0)
+    # 1. Consensus Exact SHAP (Mean of all 50 runs for patient-level beeswarm plots)
+    consensus_shap_exact = np.mean(all_shap_values, axis=0)
+    np.save(OUT_SHAP_DATA / "shap_values_exact_test.npy", consensus_shap_exact)
+    df_test_features.to_csv(OUT_SHAP_DATA / "test_features_scaled.csv", index=False)
+    
+    # 2. Global Feature Importance (Mean Absolute SHAP)
+    # Get mean absolute SHAP for each feature per model, shape: (50, n_features)
+    model_mean_abs_shap = np.mean(np.abs(all_shap_values), axis=1)
+    
+    # Calculate global mean and 95% CIs across the 50 runs
+    global_mean_importance = np.mean(model_mean_abs_shap, axis=0)
+    lower_ci = np.percentile(model_mean_abs_shap, 2.5, axis=0)
+    upper_ci = np.percentile(model_mean_abs_shap, 97.5, axis=0)
     
     df_consensus = pd.DataFrame({
         "Feature": feature_names,
-        "Mean_Abs_SHAP": mean_importance,
+        "Mean_Abs_SHAP": global_mean_importance,
         "Lower_95CI": lower_ci,
         "Upper_95CI": upper_ci
     }).sort_values(by="Mean_Abs_SHAP", ascending=False).reset_index(drop=True)
     
     df_consensus.to_csv(OUT_SHAP_DATA / "consensus_feature_importance.csv", index=False)
     
-    # Export top 20 to JSON for easy manuscript text generation
     with open(OUT_SHAP_DATA / "top_20_consensus_features.json", "w") as f:
         json.dump(df_consensus.head(20).to_dict(orient="records"), f, indent=4)
 
     # ---------------------------------------------------------
-    # 6. CONSOLE REPORT
+    # 5. CONSOLE REPORT
     # ---------------------------------------------------------
-    print("\n" + "="*75)
-    print(" TOP 10 CLINICAL DRIVERS OF SEPSIS MORTALITY (CONSENSUS SHAP)")
-    print("="*75)
+    print("\n=========================================================================")
+    print(f" TOP 10 CLINICAL DRIVERS OF SEPSIS MORTALITY ({N_MODELS}-MODEL CONSENSUS SHAP)")
+    print("=========================================================================")
     for i, row in df_consensus.head(10).iterrows():
-        print(f" {i+1:>2}. {row['Feature']:<25} | {row['Mean_Abs_SHAP']:.4f} [95% CI: {row['Lower_95CI']:.4f} - {row['Upper_95CI']:.4f}]")
-    print("="*75)
+        print(f" {i+1:>2}. {row['Feature']:<30} | {row['Mean_Abs_SHAP']:.4f} [95% CI: {row['Lower_95CI']:.4f} - {row['Upper_95CI']:.4f}]")
+    print("=========================================================================")
 
-    elapsed = time.time() - start_time
-    print(f"[*] SHAP interpretation completed in {elapsed:.1f} seconds.")
+    print(f"[*] SHAP interpretation completed in {time.time() - start_time:.1f} seconds.")
 
 if __name__ == "__main__":
     main()
