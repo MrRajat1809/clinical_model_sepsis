@@ -43,6 +43,7 @@ OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 for d in [OUT_MODELS, OUT_FEATS, OUT_METRICS, OUT_FIGURES]:
     d.mkdir(parents=True, exist_ok=True)
 
+# [FIX]: Synchronized to the new explicit prefix 
 FEAT_NAMES_FILE = OUT_FEATS / "mimic_champion_features.json"
 
 BASE_RANDOM_STATE = 42
@@ -82,8 +83,12 @@ def main():
     y_train = df_cohort["hospital_expire_flag"].fillna(0).astype(int).values[idx_train]
     y_train = np.ravel(y_train)
 
-    with open(FEAT_NAMES_FILE, "r") as f:
-        feature_names = np.array(json.load(f))
+    try:
+        with open(FEAT_NAMES_FILE, "r") as f:
+            feature_names = np.array(json.load(f))
+    except Exception as e:
+        print(f"[ERROR] Failed to load {FEAT_NAMES_FILE}. Error: {e}")
+        return
 
     # Flatten the 3D tensor
     static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
@@ -162,6 +167,7 @@ def main():
         "Selection_Frequency_Pct": selection_frequencies
     }).sort_values(by="Selection_Frequency_Pct", ascending=False).reset_index(drop=True)
     
+    # [FIX]: Use Explicit mimic_ prefixes for generated files
     df_stability.to_csv(OUT_METRICS / "mimic_rfecv_100_iteration_stability.csv", index=False)
     
     # Isolate highly stable features (e.g., >80% retention)

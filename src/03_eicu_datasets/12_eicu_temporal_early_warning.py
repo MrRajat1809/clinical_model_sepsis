@@ -39,8 +39,8 @@ PROCESSED_DIR_EICU = BASE_DIR / "data" / "processed" / "eicu"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
-# Inputs
-CHAMPION_METRICS = OUT_METRICS / "champion_metrics.json"
+# Inputs - [FIX]: Pointed to the newly named mimic_champion_metrics.json
+CHAMPION_METRICS = OUT_METRICS / "mimic_champion_metrics.json"
 
 MIMIC_TENSOR = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_IDS = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
@@ -188,6 +188,7 @@ def main():
     plt.savefig(OUT_PLOT, dpi=300)
     
     print(f"[*] Pipeline completed in {time.time() - start_time:.2f} seconds.")
+    print(f"    -> Plot saved to: {OUT_PLOT.relative_to(BASE_DIR)}")
     print(f"    -> Metrics saved to: {OUT_JSON.relative_to(BASE_DIR)}")
 
 if __name__ == "__main__":

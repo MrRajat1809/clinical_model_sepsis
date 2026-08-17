@@ -3,13 +3,13 @@
 
 Takes the precomputed SHAPE-BASED DTW pairwise distance matrix (MeanVariance scaled) 
 and projects it into a 2D manifold using PHATE.
-Generates an 8-panel publication-quality figure coloring the manifold by Mortality, 
-SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to compare side-by-side 
-against the Clinical/Severity Atlas.
 
 Features included: 
-- Expanded to 8 panels to match the clinical severity characterization.
+- Generates an 8-panel publication-quality figure coloring the manifold by Mortality, 
+  SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to compare side-by-side 
+  against the Severity Atlas.
 - Applied the raw-data ventilation extraction and muted color shuffling to prevent overplotting.
+- Explicitly loads the `_shape_` distance matrix and outputs explicit shape artifacts.
 """
 
 import time
@@ -29,27 +29,32 @@ warnings.filterwarnings("ignore")
 # CONFIGURATION
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parents[2]
+
+# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
-OUT_FIGURES_DIR = BASE_DIR / "outputs" / "figures"
+
+# Flattened Global Outputs
+OUT_FEATS = BASE_DIR / "outputs" / "features"
+OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
 def run_shape_atlas_characterization():
     print("[*] Initializing PHATE Manifold Projection (Shape/Morphology Space)...")
     start_time = time.time()
     
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_FEATS.mkdir(parents=True, exist_ok=True)
+    OUT_FIGURES.mkdir(parents=True, exist_ok=True)
     
-    # Explicitly named input files from previous scripts
-    dist_matrix_file = PROCESSED_DIR / "mimic_shape_dtw_distance_matrix.npy"
-    stay_id_file = PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy"
+    # Inputs
+    dist_matrix_file = OUT_FEATS / "mimic_dtw_shape_pairwise_distance_matrix.npy"
+    stay_id_file = OUT_FEATS / "mimic_shape_atlas_stay_ids.npy"
     cohort_file = PROCESSED_DIR / "mimic_final_sepsis3_cohort.parquet"
     tensor_file = PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy"
     raw_tensor_file = PROCESSED_DIR / "mimic_sepsis_tensor_raw.npy"  
     features_file = PROCESSED_DIR / "mimic_sepsis_tensor_features.npy"
     
-    # Flattened and prefixed outputs
-    atlas_coords_file = PROCESSED_DIR / "mimic_phate_shape_coordinates.parquet"
-    plot_file = OUT_FIGURES_DIR / "mimic_shape_trajectory_manifold.png"
+    # Outputs
+    atlas_coords_file = OUT_FEATS / "mimic_phate_shape_coordinates.parquet"
+    plot_file = OUT_FIGURES / "mimic_Shape_Trajectory_Manifold.png"
     
     if not dist_matrix_file.exists():
         print(f"[ERROR] Distance matrix not found at {dist_matrix_file}")

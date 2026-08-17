@@ -57,12 +57,15 @@ EICU_COHORT_FILE = PROCESSED_DIR_EICU / "eicu_final_sepsis3_cohort.parquet"
 MIMIC_TENSOR_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_STAY_ID_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
 MIMIC_COHORT_FILE = PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet"
-MIMIC_TRAIN_IDX_FILE = PROCESSED_DIR_MIMIC / "mimic_train_indices.npy"
+
+# [FIX]: Train indices relocated to OUT_MODELS
+MIMIC_TRAIN_IDX_FILE = OUT_MODELS / "mimic_train_indices.npy"
 
 # Feature Cutoff & Model Files
-FEAT_NAMES_FILE = OUT_FEATS / "champion_features.json"
-STABLE_FEATS_FILE = OUT_FEATS / "stable_optimal_features.json"
-PRUNED_MODEL_FILE = OUT_MODELS / "pruned_champion_xgboost.joblib"
+# [FIX]: Ensure feature names point to new 'mimic_' prefixes
+FEAT_NAMES_FILE = OUT_FEATS / "mimic_champion_features.json"
+STABLE_FEATS_FILE = OUT_FEATS / "mimic_stable_optimal_features.json"
+PRUNED_MODEL_FILE = OUT_MODELS / "mimic_pruned_champion_xgboost.joblib"
 
 # Outputs
 METRICS_FILE = OUT_METRICS / "eicu_pruned_metrics.json"

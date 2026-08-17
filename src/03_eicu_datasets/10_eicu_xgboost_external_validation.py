@@ -56,10 +56,12 @@ EICU_COHORT_FILE = PROCESSED_DIR_EICU / "eicu_final_sepsis3_cohort.parquet"
 MIMIC_TENSOR_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_STAY_ID_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
 MIMIC_COHORT_FILE = PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet"
-MIMIC_TRAIN_IDX_FILE = PROCESSED_DIR_MIMIC / "mimic_train_indices.npy"
 
-# Locked Champion Model Path
-XGB_MODEL_FILE = OUT_MODELS / "champion_xgboost.joblib"
+# [FIX]: Train indices are located in OUT_MODELS
+MIMIC_TRAIN_IDX_FILE = OUT_MODELS / "mimic_train_indices.npy"
+
+# [FIX]: Updated locked Champion Model Path
+XGB_MODEL_FILE = OUT_MODELS / "mimic_champion_xgboost.joblib"
 
 # Outputs
 METRICS_FILE = OUT_METRICS / "eicu_champion_metrics.json"
@@ -76,20 +78,20 @@ def compute_calibration_metrics(y_true, y_prob):
     eps = 1e-15
     y_prob_clipped = np.clip(y_prob, eps, 1 - eps)
     logits = logit(y_prob_clipped).reshape(-1, 1)
-    
+
     from sklearn.linear_model import LogisticRegression
     lr = LogisticRegression(random_state=RANDOM_STATE)
     lr.fit(logits, y_true)
-    
+
     return lr.coef_[0][0], lr.intercept_[0]
 
 def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
     y_pred = (y_prob >= threshold).astype(int)
-    
+
     auroc = roc_auc_score(y_true, y_prob)
     auprc = average_precision_score(y_true, y_prob)
     brier = brier_score_loss(y_true, y_prob)
-    
+
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
@@ -98,7 +100,7 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
     f1 = f1_score(y_true, y_pred, zero_division=0)
     bal_acc = balanced_accuracy_score(y_true, y_pred)
     cal_slope, cal_intercept = compute_calibration_metrics(y_true, y_prob)
-    
+
     rng = np.random.default_rng(RANDOM_STATE)
     boot_auroc, boot_auprc, boot_brier = [], [], []
     for _ in range(n_bootstraps):
@@ -131,10 +133,10 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
 def main():
     print("[*] Initiating External Validation (Champion XGBoost)...")
     start_time = time.time()
-    
+
     OUT_METRICS.mkdir(parents=True, exist_ok=True)
     OUT_FIGURES.mkdir(parents=True, exist_ok=True)
-    
+
     if not XGB_MODEL_FILE.exists():
         print(f"[ERROR] Locked XGBoost model not found at {XGB_MODEL_FILE}")
         return
@@ -151,27 +153,27 @@ def main():
     except Exception as e:
         print(f"[ERROR] Failed to load MIMIC-IV reference data. Error: {e}")
         return
-        
+
     df_mimic = pd.DataFrame({"stay_id": mimic_stay_ids}).merge(df_mimic, on="stay_id", how="left")
-    
+
     static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
     df_mimic_static = df_mimic[static_cols].copy()
     if "gender" in df_mimic_static.columns and df_mimic_static["gender"].dtype == 'O':
         df_mimic_static["gender"] = (df_mimic_static["gender"] == "M").astype(int)
-        
+
     X_mimic_static_raw = df_mimic_static.fillna(0).values
-    
+
     # Fit Static Scaler EXACTLY as in training script (on train_val only)
     scaler_static = StandardScaler()
     scaler_static.fit(X_mimic_static_raw[mimic_train_idx])
-    
+
     # Fit Temporal Scaler EXACTLY as in training script (on full dataset)
     mimic_mean = np.mean(mimic_tensor, axis=1)
     mimic_min = np.min(mimic_tensor, axis=1)
     mimic_max = np.max(mimic_tensor, axis=1)
     mimic_std = np.std(mimic_tensor, axis=1)
     X_mimic_temporal_raw = np.concatenate([mimic_mean, mimic_min, mimic_max, mimic_std], axis=1)
-    
+
     scaler_temporal = StandardScaler()
     scaler_temporal.fit(X_mimic_temporal_raw)
 
@@ -189,15 +191,15 @@ def main():
 
     df_eicu = pd.DataFrame({"stay_id": eicu_stay_ids}).merge(df_eicu, on="stay_id", how="left")
     y_test = df_eicu["hospital_expire_flag"].values
-    
+
     # Static eICU
     df_eicu_static = df_eicu[static_cols].copy()
     if "gender" in df_eicu_static.columns and df_eicu_static["gender"].dtype == 'O':
         df_eicu_static["gender"] = (df_eicu_static["gender"] == "M").astype(int)
-        
+
     X_eicu_static_raw = df_eicu_static.fillna(0).values
     X_eicu_static_scaled = scaler_static.transform(X_eicu_static_raw)
-    
+
     # Temporal eICU
     eicu_mean = np.mean(eicu_tensor, axis=1)
     eicu_min = np.min(eicu_tensor, axis=1)
@@ -205,10 +207,10 @@ def main():
     eicu_std = np.std(eicu_tensor, axis=1)
     X_eicu_temporal_raw = np.concatenate([eicu_mean, eicu_min, eicu_max, eicu_std], axis=1)
     X_eicu_temporal_scaled = scaler_temporal.transform(X_eicu_temporal_raw)
-    
+
     # Final Fused eICU Tensor
     X_test = np.concatenate([X_eicu_static_scaled, X_eicu_temporal_scaled], axis=1)
-    
+
     print(f"       - eICU Cohort Size: {len(y_test):,} patients")
     print(f"       - eICU Mortality Rate: {y_test.mean() * 100:.2f}%")
     print(f"       - Final Feature Vector Shape: {X_test.shape}")
@@ -218,10 +220,10 @@ def main():
     # ---------------------------------------------------------
     print("    -> Loading locked MIMIC-IV XGBoost model (Inference Mode)...")
     champion_xgb = joblib.load(XGB_MODEL_FILE)
-    
+
     print(f"    -> Running Evaluation & {N_BOOTSTRAPS}-Iteration Bootstrap...")
     preds = champion_xgb.predict_proba(X_test)[:, 1]
-    
+
     # Save Predictions
     df_preds = pd.DataFrame({
         "stay_id": eicu_stay_ids,
@@ -230,13 +232,13 @@ def main():
         "pred_label": (preds >= 0.5).astype(int)
     })
     df_preds.to_csv(PREDS_FILE, index=False)
-    
+
     # Calculate Metrics
     metrics = evaluate_champion(y_test, preds, n_bootstraps=N_BOOTSTRAPS)
-    
+
     with open(METRICS_FILE, "w") as f:
         json.dump({"model": "Champion_XGBoost_External_Validation", "metrics": metrics}, f, indent=4)
-        
+
     print("\n" + "="*60)
     print(" EXTERNAL VALIDATION (eICU) PERFORMANCE")
     print("="*60)
@@ -251,10 +253,10 @@ def main():
     print("\n    -> Generating Publication-Quality ROC and PR Curves...")
     fpr, tpr, _ = roc_curve(y_test, preds)
     precision, recall, _ = precision_recall_curve(y_test, preds)
-    
+
     sns.set_theme(style="whitegrid")
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    
+
     # AUROC Curve
     axes[0].plot(fpr, tpr, color='#C44E52', lw=2, label=f'eICU Validation (AUROC = {metrics["AUROC"]:.3f})')
     axes[0].plot([0, 1], [0, 1], color='gray', linestyle='--')
@@ -264,7 +266,7 @@ def main():
     axes[0].set_ylabel('True Positive Rate', fontsize=12, weight='bold')
     axes[0].set_title('A. Receiver Operating Characteristic (ROC)', fontsize=14, weight='bold')
     axes[0].legend(loc="lower right", frameon=True)
-    
+
     # AUPRC Curve
     baseline_pr = y_test.mean()
     axes[1].plot(recall, precision, color='#4C72B0', lw=2, label=f'eICU Validation (AUPRC = {metrics["AUPRC"]:.3f})')
@@ -275,12 +277,12 @@ def main():
     axes[1].set_ylabel('Precision', fontsize=12, weight='bold')
     axes[1].set_title('B. Precision-Recall Curve (PRC)', fontsize=14, weight='bold')
     axes[1].legend(loc="upper right", frameon=True)
-    
+
     sns.despine()
     plt.tight_layout()
     plt.savefig(ROC_PLOT_FILE, dpi=300, bbox_inches="tight")
     plt.close()
-    
+
     elapsed = time.time() - start_time
     print(f"\n[+] Success! External validation completed in {elapsed:.2f} seconds.")
     print(f"    -> Metrics saved to: {METRICS_FILE.relative_to(BASE_DIR)}")

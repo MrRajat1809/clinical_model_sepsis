@@ -1,5 +1,5 @@
 """
-09_temporal_early_warning.py
+10_temporal_early_warning.py
 
 Clinical Actionability (Lead-Time Bias / Temporal Slicing Analysis)
 Evaluates how early the Champion XGBoost model achieves high predictive power.
@@ -34,17 +34,20 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR_MIMIC = BASE_DIR / "data" / "processed" / "mimiciv"
 
 # Flattened Global Outputs
+OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
 # Inputs
-CHAMPION_METRICS = OUT_METRICS / "champion_metrics.json"
+CHAMPION_METRICS = OUT_METRICS / "mimic_champion_metrics.json"
 
 MIMIC_TENSOR = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_IDS = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
 MIMIC_COHORT = PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet"
-MIMIC_TRAIN_IDX = PROCESSED_DIR_MIMIC / "mimic_train_indices.npy"
-MIMIC_TEST_IDX = PROCESSED_DIR_MIMIC / "mimic_test_indices.npy"
+
+# [FIX]: Pointed to OUT_MODELS and correct test set filename
+MIMIC_TRAIN_IDX = OUT_MODELS / "mimic_train_indices.npy"
+MIMIC_TEST_IDX = OUT_MODELS / "mimic_test_set_indices.npy"
 
 # Outputs
 OUT_PLOT = OUT_FIGURES / "mimic_temporal_early_warning.png"

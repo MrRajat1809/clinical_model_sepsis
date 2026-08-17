@@ -1,13 +1,14 @@
 """
-09a_eicu_DTW_atlas_severity.py
+09a_mimic_DTW_atlas_severity.py
 
 Computes the pairwise Dynamic Time Warping (DTW) distance matrix for the fully imputed 
-eICU 3D time-series tensor based on ABSOLUTE CLINICAL STATE (Severity).
+3D time-series tensor to map the patient trajectory manifold based on ABSOLUTE CLINICAL STATE.
 
 Features included:
-- Applies a global 2D StandardScaler across all patients and timesteps. 
-  This ensures all physiological variables are weighted equally by the DTW distance metric, 
-  while preserving the absolute magnitude (severity) of the patient's condition.
+- Applies a global 2D StandardScaler across all patients and timesteps. This ensures 
+  all physiological variables are weighted equally by the DTW distance metric, while 
+  preserving the absolute magnitude (severity) of the patient's condition.
+- Represents the multi-organ "severity" counterpart to the previously computed "shape" atlas.
 - Filenames explicitly designated with `_severity_` to prevent clashes with the Shape manifold.
 """
 
@@ -29,29 +30,32 @@ warnings.filterwarnings("ignore")
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Inputs
-PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
+# Flattened Data Inputs
+PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Outputs
+# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 
 def run_clinical_atlas():
-    print("[*] Initializing eICU Clinical Tensor Atlas & Pairwise DTW Pipeline...")
+    print("[*] Initializing Severity Tensor Atlas & Pairwise DTW Pipeline...")
     start_time = time.time()
     
-    for d in [OUT_FEATS, OUT_MODELS, OUT_METRICS]:
-        d.mkdir(parents=True, exist_ok=True)
+    # Ensure directories exist
+    OUT_FEATS.mkdir(parents=True, exist_ok=True)
+    OUT_MODELS.mkdir(parents=True, exist_ok=True)
+    OUT_METRICS.mkdir(parents=True, exist_ok=True)
     
-    tensor_file = PROCESSED_DIR / "eicu_sepsis_imputed_tensor.npy"
-    id_file = PROCESSED_DIR / "eicu_sepsis_tensor_stay_ids.npy"
+    # Inputs from previous scripts
+    tensor_file = PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy"
+    id_file = PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy"
     
-    # Atlas Outputs - Explicitly named with "severity" to avoid clashing with shape matrices
-    distance_matrix_file = OUT_FEATS / "eicu_dtw_severity_pairwise_distance_matrix.npy"
-    atlas_ids_file = OUT_FEATS / "eicu_severity_atlas_stay_ids.npy"
-    scaler_file = OUT_MODELS / "eicu_global_severity_scaler.joblib"
-    metadata_file = OUT_METRICS / "eicu_severity_atlas_metadata.json"
+    # Outputs routed strictly by artifact type and explicitly named with "severity"
+    distance_matrix_file = OUT_FEATS / "mimic_dtw_severity_pairwise_distance_matrix.npy"
+    atlas_ids_file = OUT_FEATS / "mimic_severity_atlas_stay_ids.npy"
+    scaler_file = OUT_MODELS / "mimic_dtw_severity_scaler.joblib"
+    metadata_file = OUT_METRICS / "mimic_severity_atlas_metadata.json"
     
     if not tensor_file.exists() or not id_file.exists():
         print(f"[ERROR] Required tensor files not found in {PROCESSED_DIR}")
@@ -59,15 +63,11 @@ def run_clinical_atlas():
 
     # 1. Load the imputed clinical tensor and patient IDs
     print("    -> Loading 3D Tensor and Patient IDs...")
-    try:
-        X_clinical = np.load(tensor_file)
-        stay_ids = np.load(id_file)
-    except Exception as e:
-        print(f"[ERROR] Failed to load arrays. Error: {e}")
-        return
+    X_clinical = np.load(tensor_file)
+    stay_ids = np.load(id_file)
     
     num_patients, n_steps, n_features = X_clinical.shape
-    print(f"    -> eICU Cohort size: {num_patients:,} patients | Steps: {n_steps} | Features: {n_features}")
+    print(f"    -> Cohort size: {num_patients} patients | Steps: {n_steps} | Features: {n_features}")
 
     # 2. Global Standardization (Preserving Magnitude/Severity)
     print("    -> Applying global standardization to balance features while preserving absolute magnitude...")
@@ -112,14 +112,14 @@ def run_clinical_atlas():
         # Mirror across diagonal for lower triangle block
         dtw_matrix[i:, i:end_i] = chunk_dist.T
 
-    print(f"\n       - Distance Matrix Shape: {dtw_matrix.shape}")
+    print(f"\n        - Distance Matrix Shape: {dtw_matrix.shape}")
 
     # 4. Serialization
-    print("    -> Serializing clinical distance matrix...")
+    print("    -> Serializing severity distance matrix...")
     np.save(distance_matrix_file, dtw_matrix)
     
     elapsed = time.time() - start_time
-    print(f"\n[+] Success! eICU Clinical Tensor Atlas distance matrix computed.")
+    print(f"\n[+] Success! Severity Tensor Atlas distance matrix computed.")
     print(f"    -> Distance Matrix saved to: {distance_matrix_file.relative_to(BASE_DIR)}")
     print(f"    -> Total Execution time: {elapsed:.2f} seconds")
 

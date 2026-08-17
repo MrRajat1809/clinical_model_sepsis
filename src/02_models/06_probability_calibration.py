@@ -3,11 +3,15 @@
 
 Phase 5: Probability Calibration
 Validates that the Champion XGBoost model produces clinically reliable risk estimates.
+
+Features included:
 - Loads the locked Champion model.
-- Carves out a dedicated 20% calibration subset from the train/val split.
-- Fits Platt Scaling (Logistic) and Isotonic Regression calibrators strictly on the calibration set.
+- Uses Out-of-Fold (OOF) 5-fold CV predictions to fit calibrators without data leakage.
+- Converts probabilities to Logits for mathematically sound Platt Scaling.
+- Fits Platt Scaling and Isotonic Regression calibrators on the OOF predictions.
+- Calculates Optimal Decision Thresholds (Youden's J) on the unbiased OOF set.
 - Bootstraps AUROC, AUPRC, and Brier scores on the untouched test set.
-- Computes Calibration Slope, Intercept, and Expected Calibration Error (ECE).
+- Evaluates Sensitivity, Specificity, and F1 at the locked optimal threshold.
 - Exports publication-quality calibration curves and reliability histograms.
 """
 
@@ -22,9 +26,12 @@ import pandas as pd
 import polars as pl
 import matplotlib.pyplot as plt
 from scipy.special import logit
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
+from sklearn.metrics import (
+    roc_auc_score, average_precision_score, brier_score_loss,
+    roc_curve, confusion_matrix, precision_score, f1_score, balanced_accuracy_score
+)
 from sklearn.linear_model import LogisticRegression
 from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import calibration_curve
@@ -59,6 +66,25 @@ def set_seed(seed):
 # ==========================================
 # METRIC HELPERS
 # ==========================================
+def find_optimal_threshold(y_true, y_prob):
+    """Calculates Youden's J statistic optimal threshold."""
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    optimal_idx = np.argmax(tpr - fpr)
+    return float(thresholds[optimal_idx])
+
+def evaluate_threshold_metrics(y_true, y_prob, threshold):
+    """Evaluates threshold-dependent clinical metrics."""
+    y_pred = (y_prob >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    ppv = precision_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    bal_acc = balanced_accuracy_score(y_true, y_pred)
+    
+    return float(sensitivity), float(specificity), float(ppv), float(f1), float(bal_acc)
+
 def expected_calibration_error(y_true, y_prob, n_bins=10):
     """Computes the Expected Calibration Error (ECE)."""
     bins = np.linspace(0., 1., n_bins + 1)
@@ -75,7 +101,7 @@ def expected_calibration_error(y_true, y_prob, n_bins=10):
 def compute_slope_intercept(y_true, y_prob):
     """Computes Calibration Slope and Intercept with strict float64 safeguards."""
     y_prob_64 = np.array(y_prob, dtype=np.float64)
-    eps = 1e-6
+    eps = 1e-15
     y_prob_clipped = np.clip(y_prob_64, eps, 1.0 - eps)
     
     logits = logit(y_prob_clipped).reshape(-1, 1)
@@ -89,7 +115,7 @@ def compute_slope_intercept(y_true, y_prob):
 # ==========================================
 def main():
     set_seed(RANDOM_STATE)
-    print("[*] Initiating Phase 6: Probability Calibration...")
+    print("[*] Initiating Phase 5: Probability Calibration & Threshold Optimization...")
     start_time = time.time()
     
     # ---------------------------------------------------------
@@ -138,28 +164,50 @@ def main():
     X_test, y_test = X_fused[idx_test], y[idx_test]
 
     # ---------------------------------------------------------
-    # 3. DEDICATED CALIBRATION SPLIT
+    # 3. OUT-OF-FOLD (OOF) PREDICTIONS FOR UNBIASED CALIBRATION
     # ---------------------------------------------------------
-    print("    -> Carving out dedicated 20% calibration subset...")
-    _, X_calib, _, y_calib = train_test_split(
-        X_train_val, y_train_val, test_size=0.20, random_state=RANDOM_STATE, stratify=y_train_val
-    )
-
-    # ---------------------------------------------------------
-    # 4. GENERATE PREDICTIONS & FIT CALIBRATORS
-    # ---------------------------------------------------------
-    print("    -> Generating Champion predictions...")
-    preds_calib = champion_xgb.predict_proba(X_calib)[:, 1]
+    print("    -> Generating Out-of-Fold (OOF) predictions to prevent calibration data leakage...")
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    preds_calib_uncal = cross_val_predict(
+        champion_xgb, X_train_val, y_train_val, 
+        cv=cv, method='predict_proba', n_jobs=-1
+    )[:, 1]
+    
+    y_calib = y_train_val  # The true labels match the OOF predictions
+    
+    print("    -> Generating Champion predictions on the unseen test set...")
     preds_test_uncal = champion_xgb.predict_proba(X_test)[:, 1]
 
-    print("    -> Fitting Platt Scaling & Isotonic Regression on calibration set...")
-    platt_calibrator = LogisticRegression(solver='lbfgs')
-    platt_calibrator.fit(preds_calib.reshape(-1, 1), y_calib)
-    preds_test_platt = platt_calibrator.predict_proba(preds_test_uncal.reshape(-1, 1))[:, 1]
+    # ---------------------------------------------------------
+    # 4. FIT CALIBRATORS & FIND OPTIMAL THRESHOLDS
+    # ---------------------------------------------------------
+    print("    -> Fitting Platt Scaling (on logits) & Isotonic Regression...")
+    eps = 1e-15
+    logits_calib_uncal = logit(np.clip(preds_calib_uncal, eps, 1 - eps)).reshape(-1, 1)
+    logits_test_uncal = logit(np.clip(preds_test_uncal, eps, 1 - eps)).reshape(-1, 1)
+
+    platt_calibrator = LogisticRegression(solver='lbfgs', random_state=RANDOM_STATE)
+    platt_calibrator.fit(logits_calib_uncal, y_calib)
+    
+    preds_calib_platt = platt_calibrator.predict_proba(logits_calib_uncal)[:, 1]
+    preds_test_platt = platt_calibrator.predict_proba(logits_test_uncal)[:, 1]
 
     iso_calibrator = IsotonicRegression(y_min=0, y_max=1, out_of_bounds='clip')
-    iso_calibrator.fit(preds_calib, y_calib)
+    iso_calibrator.fit(preds_calib_uncal, y_calib)
+    
+    preds_calib_iso = iso_calibrator.predict(preds_calib_uncal)
     preds_test_iso = iso_calibrator.predict(preds_test_uncal)
+
+    print("    -> Locking optimal clinical thresholds (Youden's J) using OOF Calibration Data...")
+    thresh_uncal = find_optimal_threshold(y_calib, preds_calib_uncal)
+    thresh_platt = find_optimal_threshold(y_calib, preds_calib_platt)
+    thresh_iso = find_optimal_threshold(y_calib, preds_calib_iso)
+    
+    thresholds = {
+        "Uncalibrated": thresh_uncal,
+        "Platt": thresh_platt,
+        "Isotonic": thresh_iso
+    }
 
     # Export Calibrators
     joblib.dump(platt_calibrator, OUT_MODELS / "mimic_platt_calibrator.joblib")
@@ -208,6 +256,7 @@ def main():
     for name, preds in models.items():
         slope, intercept = compute_slope_intercept(y_test, preds)
         ece = expected_calibration_error(y_test, preds)
+        sens, spec, ppv, f1, bal_acc = evaluate_threshold_metrics(y_test, preds, thresholds[name])
         
         summary_metrics[name] = {
             "AUROC": np.mean(boot_results[name]["auroc"]),
@@ -216,6 +265,12 @@ def main():
             "AUPRC_CI": [np.percentile(boot_results[name]["auprc"], 2.5), np.percentile(boot_results[name]["auprc"], 97.5)],
             "Brier": np.mean(boot_results[name]["brier"]),
             "Brier_CI": [np.percentile(boot_results[name]["brier"], 2.5), np.percentile(boot_results[name]["brier"], 97.5)],
+            "Optimal_Threshold": thresholds[name],
+            "Sensitivity": sens,
+            "Specificity": spec,
+            "PPV": ppv,
+            "F1": f1,
+            "Balanced_Accuracy": bal_acc,
             "Slope": slope,
             "Intercept": intercept,
             "ECE": ece
@@ -286,6 +341,7 @@ def main():
     for name, m in summary_metrics.items():
         print(f" [{name}]")
         print(f"   AUROC: {m['AUROC']:.4f} | AUPRC: {m['AUPRC']:.4f} | Brier: {m['Brier']:.4f}")
+        print(f"   Opt Cutoff: {m['Optimal_Threshold']:.4f} | Sens: {m['Sensitivity']:.4f}  | Spec: {m['Specificity']:.4f}")
         print(f"   Slope: {m['Slope']:>6.3f} | Int: {m['Intercept']:>6.3f}   | ECE: {m['ECE']:.4f}")
         print("-" * 40)
         

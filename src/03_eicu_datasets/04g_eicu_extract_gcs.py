@@ -6,6 +6,9 @@ Utilizes direct string-to-float casting since the eICU vocabulary profiler
 revealed the scores are stored as clean numerical strings (e.g., '6', '5', '4').
 
 Features included:
+- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
+  circular dependency.
+- Anchors the extraction window to `sit_offset` and widens it to +/- 48 hours.
 - Enabled Polars streaming engine to prevent OOM crashes during the processing 
   of the massive nurseCharting table.
 """
@@ -54,16 +57,18 @@ def extract_gcs():
     start_time = time.time()
     
     charting_file = RAW_EICU_DIR / "nurseCharting.csv.gz"
-    cohort_file = PROCESSED_DIR / "eicu_final_sepsis3_cohort.parquet"
+    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_file = PROCESSED_DIR / "eicu_gcs_timeline.parquet"
     
     if not charting_file.exists():
         print(f"[ERROR] Required raw eICU file not found: {charting_file}")
         return
 
-    print("    -> Loading Sepsis-3 cohort...")
+    print("    -> Loading Sepsis Phenotype cohort...")
     try:
-        df_cohort = pl.read_parquet(cohort_file).select(["stay_id", "sepsis_onset_offset"])
+        # [FIX]: Load sit_offset instead of sepsis_onset_offset
+        df_cohort = pl.read_parquet(cohort_file).select(["stay_id", "sit_offset"])
     except Exception as e:
         print(f"[ERROR] Failed to load cohort file at {cohort_file}. Error: {e}")
         return
@@ -88,12 +93,12 @@ def extract_gcs():
     
     df_joined = df_gcs.join(df_cohort.lazy(), on="stay_id", how="inner")
     
-    # Calculate temporal window and cast value to float
+    # [FIX]: Calculate temporal window based on SIT and expand to +/- 48 hours
     df_window = df_joined.with_columns(
-        ((pl.col("event_time") - pl.col("sepsis_onset_offset")) / 60.0).alias("hours_from_onset"),
+        ((pl.col("event_time") - pl.col("sit_offset")) / 60.0).alias("hours_from_sit"),
         pl.col("chart_value").cast(pl.Float64, strict=False).alias("valuenum")
     ).filter(
-        (pl.col("hours_from_onset") >= -48) & (pl.col("hours_from_onset") <= 24) &
+        (pl.col("hours_from_sit") >= -48) & (pl.col("hours_from_sit") <= 48) &
         pl.col("valuenum").is_not_null()
     )
 

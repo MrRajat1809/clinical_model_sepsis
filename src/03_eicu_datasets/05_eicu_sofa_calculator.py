@@ -9,7 +9,8 @@ Features included:
 - Baseline Window: -48 hours up to Suspected Infection Time (SIT)
 - Acute Window: SIT up to +24 hours
 - Converts eICU minute offsets into hours for accurate windowing.
-- Missing baseline SOFA scores (like GCS or FiO2) are clinically imputed as 0 (normal).
+- Integrates high-fidelity standalone streams (GCS, FiO2, Pressors) seamlessly with base vitals.
+- Missing baseline SOFA scores (when lab/vital data is entirely absent) are imputed as 0 (normal).
 """
 
 import time
@@ -29,23 +30,46 @@ def main():
     print("[*] Executing eICU dynamic SOFA calculation pipeline...")
     start_time = time.time()
     
-    temporal_file = PROCESSED_DIR / "eicu_sepsis_temporal_data_cleaned.parquet"
+    # ---------------------------------------------------------
+    # 1. FILE DEPENDENCIES
+    # ---------------------------------------------------------
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
+    temporal_file = PROCESSED_DIR / "eicu_sepsis_temporal_data_cleaned.parquet"
+    gcs_file = PROCESSED_DIR / "eicu_gcs_timeline.parquet"
+    fio2_file = PROCESSED_DIR / "eicu_fio2_timeline.parquet"
+    pressor_file = PROCESSED_DIR / "eicu_standardized_pressors.parquet"
+    
     out_file = PROCESSED_DIR / "eicu_final_sepsis3_cohort.parquet"
     
-    if not temporal_file.exists() or not cohort_file.exists():
-        print(f"[ERROR] Required inputs not found in {PROCESSED_DIR}")
-        return
+    required_files = [temporal_file, cohort_file, gcs_file, fio2_file, pressor_file]
+    for f in required_files:
+        if not f.exists():
+            print(f"[ERROR] Required input not found: {f}")
+            print("Please ensure scripts 03 through 04h have run successfully.")
+            return
 
     print("\n[*] Initializing Polars lazy engine and mapping eICU variables...")
     try:
-        df_vitals = pl.scan_parquet(temporal_file)
         df_cohort = pl.read_parquet(cohort_file)
+        
+        # Load high-fidelity standalone data streams
+        df_gcs = pl.scan_parquet(gcs_file).select(["stay_id", "event_time", "itemid", "valuenum"])
+        df_fio2 = pl.scan_parquet(fio2_file).select(["stay_id", "event_time", "itemid", "valuenum"])
+        
+        # Load and align pressors to the standard schema
+        df_pressor = pl.scan_parquet(pressor_file).select([
+            pl.col("stay_id"),
+            pl.col("event_time"),
+            pl.col("drug_type").alias("itemid"),
+            pl.col("standardized_rate").alias("valuenum")
+        ])
+        
+        df_vitals = pl.scan_parquet(temporal_file)
     except Exception as e:
         print(f"[ERROR] Failed to load data. Error: {e}")
         return
 
-    # Map eICU string itemids to standardized SOFA variables
+    # Map generic eICU string itemids to standardized SOFA variables (excluding pressors as they are handled)
     itemid_map = {
         "systemicmean": "map",
         "noninvasivemean": "map",         
@@ -53,7 +77,6 @@ def main():
         "total bilirubin": "bilirubin",
         "creatinine": "creatinine",
         "pao2": "pao2",
-        "vasopressor": "norepinephrine", # Treat unified eICU vasopressors as high-potency CV SOFA
         "888888": "vent"                 # Unified Mechanical Ventilation flag
     }
     
@@ -62,12 +85,23 @@ def main():
         "variable": list(itemid_map.values())
     }, schema={"itemid": pl.Utf8, "variable": pl.Utf8}).lazy()
     
-    # Filter vitals to just SOFA components and map names
-    df_mapped = df_vitals.join(mapping_df, on="itemid", how="inner")
+    # Filter base vitals to just SOFA components and map names
+    df_mapped = df_vitals.join(mapping_df, on="itemid", how="inner").select(["stay_id", "event_time", "variable", "valuenum"])
+    
+    # Standardize the itemid column to "variable" for the standalone streams
+    df_gcs = df_gcs.rename({"itemid": "variable"})
+    df_fio2 = df_fio2.rename({"itemid": "variable"})
+    df_pressor = df_pressor.rename({"itemid": "variable"})
+    
+    # Concatenate all data streams into one unified temporal timeline
+    df_unified_timeline = pl.concat([df_mapped, df_gcs, df_fio2, df_pressor])
     
     # Join with cohort to get SIT offset
-    df_joined = df_mapped.join(df_cohort.lazy().select(["stay_id", "sit_offset"]), on="stay_id")
+    df_joined = df_unified_timeline.join(df_cohort.lazy().select(["stay_id", "sit_offset"]), on="stay_id")
 
+    # ---------------------------------------------------------
+    # 2. TEMPORAL SEGMENTATION
+    # ---------------------------------------------------------
     print("[*] Segmenting temporal data into Baseline (-48h to SIT) and Acute (SIT to +24h) windows...")
     
     # Define dynamic windows relative to SIT using eICU minute offsets converted to hours
@@ -80,6 +114,9 @@ def main():
           .otherwise(pl.lit("acute")).alias("window")
     )
 
+    # ---------------------------------------------------------
+    # 3. AGGREGATION & SOFA LOGIC
+    # ---------------------------------------------------------
     print("[*] Aggregating worst physiological values per window and calculating SOFA scores...")
     
     # Find the worst values for each window
@@ -100,7 +137,8 @@ def main():
         aggregate_function="first"
     )
 
-    # Inject missing variables that eICU lacks (GCS, FiO2, specific pressors) to maintain strict MIMIC math
+    # Inject missing variables that eICU naturally lacks (e.g. dobutamine if no patient received it) 
+    # to prevent KeyErrors during the SOFA math evaluation.
     expected_cols = [
         "map", "platelets", "bilirubin", "creatinine", 
         "gcs_eye", "gcs_verbal", "gcs_motor", 
@@ -143,7 +181,6 @@ def main():
           .when(pl.col("bilirubin") >= 1.2).then(1)
           .otherwise(0).alias("sofa_liver"),
 
-        # Strict Sepsis-3 Cardiovascular SOFA thresholds (Routing eICU generic pressors through norepi)
         pl.when(
             (pl.col("dopamine") > 15.0) | 
             (pl.col("epinephrine") > 0.1) | 
@@ -179,7 +216,9 @@ def main():
          pl.col("sofa_cv") + pl.col("sofa_cns") + pl.col("sofa_renal")).alias("total_sofa")
     )
     
-    # Isolate Baseline metrics for downstream prediction
+    # ---------------------------------------------------------
+    # 4. COHORT ADJUDICATION (Delta SOFA)
+    # ---------------------------------------------------------
     df_baseline = df_total_sofa.filter(pl.col("window") == "baseline").select(
         pl.col("stay_id"),
         pl.col("total_sofa").alias("baseline_sofa"),
@@ -207,6 +246,9 @@ def main():
     # Filter for Sepsis-3 Criteria
     sepsis3_stay_ids = df_final_pivot.filter(pl.col("sofa_delta") >= 2).select("stay_id")
     
+    # ---------------------------------------------------------
+    # 5. SEPSIS ONSET TIME DEFINITION
+    # ---------------------------------------------------------
     print("[*] Re-evaluating exact Sepsis Onset Time (intersection of infection and deterioration)...")
     
     # Find exact Sepsis Onset Time by scanning for the earliest abnormal SOFA-triggering event in the acute window

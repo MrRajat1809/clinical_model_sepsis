@@ -12,6 +12,7 @@ Features included:
   (cdist_dtw) to feed manifold learning algorithms (e.g., PHATE).
 - Implemented smart upper-triangular batching wrapped in a tqdm progress bar 
   to track the O(N^2) computation without losing tslearn's self-similarity optimization.
+- Filenames explicitly designated with `_shape_` to prevent clashes with the Severity manifold.
 """
 
 import time
@@ -29,23 +30,28 @@ warnings.filterwarnings("ignore")
 # CONFIGURATION
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parents[2]
+
+# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
-OUT_MODELS_DIR = BASE_DIR / "outputs" / "models"
+
+# Flattened Global Outputs
+OUT_FEATS = BASE_DIR / "outputs" / "features"
+OUT_MODELS = BASE_DIR / "outputs" / "models"
 
 def run_tensor_atlas():
     print("[*] Initializing Tensor Atlas & Pairwise DTW Distance Pipeline...")
     start_time = time.time()
     
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    OUT_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_FEATS.mkdir(parents=True, exist_ok=True)
+    OUT_MODELS.mkdir(parents=True, exist_ok=True)
     
-    # Explicitly named input files from 07b and 07a
     tensor_file = PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy"
     id_file = PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy"
     
-    # Flattened and explicitly prefixed outputs
-    distance_matrix_file = PROCESSED_DIR / "mimic_shape_dtw_distance_matrix.npy"
-    scaler_file = OUT_MODELS_DIR / "mimic_shape_dtw_scaler.joblib"
+    # Atlas Outputs explicitly routed and named with "shape"
+    distance_matrix_file = OUT_FEATS / "mimic_dtw_shape_pairwise_distance_matrix.npy"
+    atlas_ids_file = OUT_FEATS / "mimic_shape_atlas_stay_ids.npy"
+    scaler_file = OUT_MODELS / "mimic_dtw_shape_scaler.joblib"
     
     if not tensor_file.exists() or not id_file.exists():
         print(f"[ERROR] Required tensor files not found in {PROCESSED_DIR}")
@@ -64,7 +70,7 @@ def run_tensor_atlas():
     scaler = TimeSeriesScalerMeanVariance()
     X_scaled = scaler.fit_transform(X_clinical)
     
-    # Save the fitted scaler for reproducibility or vault extensions
+    # Save the fitted scaler for reproducibility
     joblib.dump(scaler, scaler_file)
 
     # 3. Compute All-Pairs DTW Distance Matrix
@@ -72,7 +78,7 @@ def run_tensor_atlas():
     
     # Pre-allocate the distance matrix
     dtw_matrix = np.zeros((num_patients, num_patients), dtype=np.float32)
-    chunk_size = 200  # Adjust if memory or updates need tuning
+    chunk_size = 200  
     
     # We iterate in chunks, only computing the upper triangle to save 50% of the compute time
     for i in tqdm(range(0, num_patients, chunk_size), desc="DTW Matrix Progress", unit="chunk"):
@@ -92,10 +98,13 @@ def run_tensor_atlas():
     # 4. Serialization
     print("    -> Serializing pairwise distance matrix and patient mapping...")
     np.save(distance_matrix_file, dtw_matrix)
+    np.save(atlas_ids_file, stay_ids)
     
     elapsed = time.time() - start_time
     print(f"\n[+] Success! Tensor Atlas distance matrix computed.")
     print(f"    -> Distance Matrix saved to: {distance_matrix_file.relative_to(BASE_DIR)}")
+    print(f"    -> Atlas IDs saved to: {atlas_ids_file.relative_to(BASE_DIR)}")
+    print(f"    -> DTW Scaler saved to: {scaler_file.relative_to(BASE_DIR)}")
     print(f"    -> Total Execution time: {elapsed:.2f} seconds")
 
 if __name__ == "__main__":

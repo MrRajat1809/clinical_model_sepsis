@@ -7,6 +7,10 @@ Extracts the embedded unit string (e.g., 'mcg/kg/min' from 'norepinephrine (mcg/
 and prioritizes the `drugrate` column without applying any mathematical conversions.
 
 Features included:
+- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
+  circular dependency.
+- Anchors the extraction window to `sit_offset` and widens it to +/- 48 hours to 
+  ensure all relevant data is captured prior to the final Sepsis-3 adjudication.
 - Correctly fetches 'admissionweight' from the raw eICU patient table 
   and joins it to the cohort before extraction.
 """
@@ -28,16 +32,18 @@ def extract_pressors():
     
     infusion_file = RAW_EICU_DIR / "infusionDrug.csv.gz"
     patient_file = RAW_EICU_DIR / "patient.csv.gz"
-    cohort_file = PROCESSED_DIR / "eicu_final_sepsis3_cohort.parquet"
+    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_file = PROCESSED_DIR / "eicu_extracted_pressors_raw.parquet"
     
     if not infusion_file.exists() or not patient_file.exists():
         print(f"[ERROR] Required raw eICU files not found in {RAW_EICU_DIR}")
         return
 
-    print("    -> Loading Sepsis-3 cohort and fetching patient weights...")
+    print("    -> Loading Sepsis Phenotype cohort and fetching patient weights...")
     try:
-        df_cohort_base = pl.read_parquet(cohort_file).select(["stay_id", "sepsis_onset_offset"])
+        # [FIX]: Load sit_offset instead of sepsis_onset_offset
+        df_cohort_base = pl.read_parquet(cohort_file).select(["stay_id", "sit_offset"])
     except Exception as e:
         print(f"[ERROR] Failed to load cohort file at {cohort_file}. Error: {e}")
         return
@@ -63,13 +69,14 @@ def extract_pressors():
         "patientunitstayid", "infusionoffset", "drugname", "drugrate", "infusionrate"
     ]).rename({"patientunitstayid": "stay_id", "infusionoffset": "event_time"})
     
-    # Filter to cohort and acute window (Onset to +24h)
+    # Filter to cohort
     df_joined = df_infusion.join(df_cohort.lazy(), on="stay_id", how="inner")
     
+    # [FIX]: Calculate temporal window based on SIT and expand to +/- 48 hours
     df_window = df_joined.with_columns(
-        ((pl.col("event_time") - pl.col("sepsis_onset_offset")) / 60.0).alias("hours_from_onset")
+        ((pl.col("event_time") - pl.col("sit_offset")) / 60.0).alias("hours_from_sit")
     ).filter(
-        (pl.col("hours_from_onset") >= 0) & (pl.col("hours_from_onset") <= 24)
+        (pl.col("hours_from_sit") >= -48) & (pl.col("hours_from_sit") <= 48)
     )
 
     print("    -> Applying strict regex word boundaries for drug identification...")

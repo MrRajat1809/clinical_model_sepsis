@@ -1,12 +1,12 @@
 """
-04_champion_xgboost.py
+04b_champion_lr.py
 
-Phase 3: Train the Final Champion Model
-Trains and tunes the definitively selected architecture: XGBoost on Static + Aggregated features.
-- Excludes Deep Learning (BiGRU) embeddings based on ablation results.
-- Runs Optuna Bayesian Optimization for exact hyperparameter tuning.
-- Exports the locked champion model, raw predictions, and comprehensive bootstrap metrics 
-  for downstream Calibration and SHAP analysis.
+Phase 3: Train the Champion Logistic Regression Model
+Trains and tunes a highly-optimized linear baseline (Logistic Regression with ElasticNet) 
+on the exact same Static + Aggregated feature space used by the XGBoost champion.
+- Serves as the definitive linear benchmark to compare against non-linear architectures.
+- Runs Optuna Bayesian Optimization for exact hyperparameter tuning (C and l1_ratio).
+- Exports the locked model, raw predictions, and comprehensive bootstrap metrics.
 """
 
 import time
@@ -25,14 +25,16 @@ from scipy.special import logit
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, brier_score_loss,
     confusion_matrix, f1_score, balanced_accuracy_score, precision_score
 )
-from xgboost import XGBClassifier
 
 import warnings
+from sklearn.exceptions import ConvergenceWarning
 warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # ==========================================
@@ -53,7 +55,7 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FEATS]:
 
 RANDOM_STATE = 42
 N_TRIALS = 30
-N_BOOTSTRAPS = 1000  # Increased for the final champion evaluation
+N_BOOTSTRAPS = 1000  
 
 def set_seed(seed):
     random.seed(seed)
@@ -68,7 +70,6 @@ def compute_calibration_metrics(y_true, y_prob):
     y_prob_clipped = np.clip(y_prob, eps, 1 - eps)
     logits = logit(y_prob_clipped).reshape(-1, 1)
     
-    from sklearn.linear_model import LogisticRegression
     lr = LogisticRegression(random_state=RANDOM_STATE)
     lr.fit(logits, y_true)
     
@@ -121,7 +122,7 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
 # ==========================================
 def main():
     set_seed(RANDOM_STATE)
-    print("[*] Initiating Phase 4: Tuning & Training Champion Model (Static + Aggregated)...")
+    print("[*] Initiating Phase 4: Tuning & Training Champion LR (Static + Aggregated)...")
     start_time = time.time()
     
     # ---------------------------------------------------------
@@ -166,14 +167,14 @@ def main():
     
     X_temporal_agg = StandardScaler().fit_transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
     
-    # Export Feature Names for SHAP
+    # Export Feature Names
     agg_names = []
     for stat in ["Mean", "Min", "Max", "Std"]:
         for feat in tensor_features:
             agg_names.append(f"{feat}_{stat}")
             
     combined_names = static_cols + agg_names
-    with open(OUT_FEATS / "mimic_champion_features.json", "w") as f: 
+    with open(OUT_FEATS / "mimic_champion_lr_features.json", "w") as f: 
         json.dump(combined_names, f)
 
     # Final Fused Dataset
@@ -181,24 +182,19 @@ def main():
     X_train_val, y_train_val = X_fused[idx_train_val], y[idx_train_val]
     X_test, y_test = X_fused[idx_test], y[idx_test]
 
-    scale_weight = float((len(y_train_val) - sum(y_train_val)) / sum(y_train_val))
-
     # ---------------------------------------------------------
-    # 3. BAYESIAN HYPERPARAMETER OPTIMIZATION
+    # 3. BAYESIAN HYPERPARAMETER OPTIMIZATION (ElasticNet)
     # ---------------------------------------------------------
-    print(f"\n    -> Running {N_TRIALS} Optuna Trials (3-Fold CV)...")
+    print(f"\n    -> Running {N_TRIALS} Optuna Trials (3-Fold CV) for Logistic Regression...")
     
     def objective(trial):
         params = {
-            "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=100),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 8),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 15),
-            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
-            "scale_pos_weight": scale_weight,
-            "eval_metric": "auc",
+            "C": trial.suggest_float("C", 1e-4, 1e2, log=True),
+            "l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
+            "penalty": "elasticnet",
+            "solver": "saga",
+            "class_weight": "balanced",
+            "max_iter": 500,
             "random_state": RANDOM_STATE,
             "n_jobs": -1
         }
@@ -207,15 +203,8 @@ def main():
         fold_scores = []
         
         for train_idx, val_idx in cv.split(X_train_val, y_train_val):
-            model = XGBClassifier(**params)
-            
-            # Added eval_set and early_stopping_rounds
-            model.fit(
-                X_train_val[train_idx], y_train_val[train_idx],
-                eval_set=[(X_train_val[val_idx], y_train_val[val_idx])],
-                early_stopping_rounds=50,
-                verbose=False
-            )
+            model = LogisticRegression(**params)
+            model.fit(X_train_val[train_idx], y_train_val[train_idx])
             
             preds = model.predict_proba(X_train_val[val_idx])[:, 1]
             fold_scores.append(roc_auc_score(y_train_val[val_idx], preds))
@@ -232,26 +221,33 @@ def main():
     print()
 
     best_params = study.best_params
-    best_params.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": -1})
+    best_params.update({
+        "penalty": "elasticnet",
+        "solver": "saga",
+        "class_weight": "balanced",
+        "max_iter": 1000, # Increased for final fit
+        "random_state": RANDOM_STATE,
+        "n_jobs": -1
+    })
     
-    print("\n    [+] Optimal Hyperparameters Found:")
+    print("\n    [+] Optimal LR Hyperparameters Found:")
     for k, v in best_params.items():
-        if k not in ["scale_pos_weight", "random_state", "n_jobs"]:
+        if k not in ["random_state", "n_jobs", "max_iter"]:
             print(f"        - {k}: {v}")
 
     # ---------------------------------------------------------
-    # 4. TRAIN & EVALUATE FINAL CHAMPION
+    # 4. TRAIN & EVALUATE FINAL CHAMPION LR
     # ---------------------------------------------------------
-    print("\n    -> Training Final Champion Model on Full Train/Val Set...")
-    champion_xgb = XGBClassifier(**best_params)
-    champion_xgb.fit(X_train_val, y_train_val)
+    print("\n    -> Training Final Champion LR Model on Full Train/Val Set...")
+    champion_lr = LogisticRegression(**best_params)
+    champion_lr.fit(X_train_val, y_train_val)
     
     # Save Model
-    joblib.dump(champion_xgb, OUT_MODELS / "mimic_champion_xgboost.joblib")
+    joblib.dump(champion_lr, OUT_MODELS / "mimic_champion_lr.joblib")
     
     # Inference
     print(f"    -> Running Evaluation & {N_BOOTSTRAPS}-Iteration Bootstrap...")
-    preds = champion_xgb.predict_proba(X_test)[:, 1]
+    preds = champion_lr.predict_proba(X_test)[:, 1]
     
     # Save Predictions
     df_preds = pd.DataFrame({
@@ -260,22 +256,22 @@ def main():
         "pred_probability": preds,
         "pred_label": (preds >= 0.5).astype(int)
     })
-    df_preds.to_csv(OUT_PREDS / "mimic_champion_predictions.csv", index=False)
+    df_preds.to_csv(OUT_PREDS / "mimic_champion_lr_predictions.csv", index=False)
     
     # Export Metrics
     metrics = evaluate_champion(y_test, preds, n_bootstraps=N_BOOTSTRAPS)
     
     out_dict = {
-        "model": "Champion_XGBoost_Static_Aggregated",
-        "hyperparameters": {k: v for k, v in best_params.items() if k not in ["scale_pos_weight", "random_state", "n_jobs"]},
+        "model": "Champion_LR_Static_Aggregated",
+        "hyperparameters": {k: v for k, v in best_params.items() if k not in ["random_state", "n_jobs"]},
         "metrics": metrics
     }
     
-    with open(OUT_METRICS / "mimic_champion_metrics.json", "w") as f:
+    with open(OUT_METRICS / "mimic_champion_lr_metrics.json", "w") as f:
         json.dump(out_dict, f, indent=4)
         
     print("\n" + "="*60)
-    print(" FINAL CHAMPION MODEL PERFORMANCE (TEST SET)")
+    print(" FINAL CHAMPION LR PERFORMANCE (TEST SET)")
     print("="*60)
     print(f"    AUROC : {metrics['AUROC']:.4f}  [95% CI: {metrics['AUROC_95CI'][0]:.4f} - {metrics['AUROC_95CI'][1]:.4f}]")
     print(f"    AUPRC : {metrics['AUPRC']:.4f}  [95% CI: {metrics['AUPRC_95CI'][0]:.4f} - {metrics['AUPRC_95CI'][1]:.4f}]")

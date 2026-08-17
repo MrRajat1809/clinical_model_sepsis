@@ -1,11 +1,13 @@
 """
 04c_eicu_profile_infusiondrug.py
 
-Profiles the raw eICU `infusionDrug` table specifically for the Sepsis-3 cohort.
+Profiles the raw eICU `infusionDrug` table specifically for the base Sepsis Phenotype cohort.
 Outputs frequency counts for drug names and rate strings to inform 
 the creation of rigorous, data-driven regex matching and unit conversion dictionaries.
 
 Features included:
+- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
+  circular dependency, allowing this to run BEFORE the final SOFA calculator (05).
 - Removed erroneous call to 'patientweight' from the cohort file. 
   We only need 'stay_id' to filter the infusion table for profiling.
 """
@@ -32,7 +34,8 @@ def profile_infusion_drugs():
     OUT_METRICS.mkdir(parents=True, exist_ok=True)
     
     infusion_file = RAW_EICU_DIR / "infusionDrug.csv.gz"
-    cohort_file = PROCESSED_DIR / "eicu_final_sepsis3_cohort.parquet"
+    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_json = OUT_METRICS / "eicu_infusiondrug_profile.json"
     out_txt = OUT_METRICS / "eicu_infusiondrug_profile_report.txt"
     
@@ -40,7 +43,7 @@ def profile_infusion_drugs():
         print(f"[ERROR] eICU infusionDrug not found at: {infusion_file}")
         return
 
-    print("    -> Loading Sepsis-3 cohort stay_ids...")
+    print("    -> Loading Sepsis Phenotype cohort stay_ids...")
     try:
         df_cohort = pl.read_parquet(cohort_file).select(["stay_id"])
     except Exception as e:
