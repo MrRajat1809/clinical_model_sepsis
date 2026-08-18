@@ -6,11 +6,14 @@ Calculates the Norepinephrine Equivalent Dose (NEQ).
 Features included:
 - Strictly implements the exact pharmacological conversion factors defined in 
   Brown et al. (2013). Phenylephrine is converted at a 1:2.2 ratio (multiplier ~0.4545).
-- Assumes the MIMIC-IV pipeline is concurrently updated to match this exact formula 
-  to prevent covariate shift.
+- Temporarily bins eICU minute-level readings into 1-hour Maximums using the 
+  "Sum of Maxes" logic (matching 07a Tensor Builder) to ensure an apples-to-apples 
+  validation comparison against the MIMIC-IV 3D Tensor.
+- [FIXED]: Compares against the RAW MIMIC tensor (ignoring NaNs) rather than the 
+  SAITS-imputed tensor to ensure we are comparing Human Charting vs Human Charting.
+- [FIXED]: Filters eICU data to the exact 0-24 hour acute window (0-1440 mins) to match 
+  MIMIC's tensor scope, removing low-dose maintenance tails that artificially deflate the median.
 - Preserves individual drug contributions (neq_from_ne, neq_from_epi, etc.) prior to summation.
-- Generates extended descriptive statistics (Max concurrent pressors, Treated patient median).
-- Compares the final eICU NEQ distribution against the MIMIC-IV tensor NEQ distribution.
 - Exports a feature equivalence report to audit potential covariate shift.
 """
 
@@ -106,7 +109,7 @@ def compute_neq_and_validate():
     # ---------------------------------------------------------
     # 2. EXTENDED CLINICAL DESCRIPTIVE STATISTICS
     # ---------------------------------------------------------
-    print("\n    [eICU NEQ DESCRIPTIVE STATISTICS]")
+    print("\n    [eICU NEQ DESCRIPTIVE STATISTICS (Reading-wise)]")
     total_patients = df_final.select(pl.col("stay_id").n_unique()).item()
     max_concurrent = df_final.select(pl.col("concurrent_pressors").max()).item()
     mean_concurrent = df_final.filter(pl.col("concurrent_pressors") > 0).select(pl.col("concurrent_pressors").mean()).item()
@@ -119,15 +122,16 @@ def compute_neq_and_validate():
     ]).row(0)
 
     print(f"        - Patients receiving Vasopressors : {total_patients:,}")
-    print(f"        - Median NEQ (Treated Events)     : {dist_treated[0]} mcg/kg/min (IQR: {dist_treated[1]} - {dist_treated[2]})")
+    print(f"        - Median NEQ (Raw Events)         : {dist_treated[0]} mcg/kg/min (IQR: {dist_treated[1]} - {dist_treated[2]})")
     print(f"        - Max Concurrent Pressors         : {max_concurrent} (Mean: {mean_concurrent:.2f})")
     print(f"        - Absolute Max NEQ Recorded       : {dist_treated[3]} mcg/kg/min")
 
     # ---------------------------------------------------------
-    # 3. MIMIC-IV DISTRIBUTION COMPARISON
+    # 3. MIMIC-IV DISTRIBUTION COMPARISON (Apples-to-Apples)
     # ---------------------------------------------------------
     print("\n    -> Extracting MIMIC-IV NEQ distribution for equivalence testing...")
-    mimic_tensor_file = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
+    # Load the RAW tensor to avoid SAITS imputed smoothing data
+    mimic_tensor_file = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_raw.npy"
     mimic_features_file = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_features.npy"
     
     if mimic_tensor_file.exists() and mimic_features_file.exists():
@@ -137,18 +141,40 @@ def compute_neq_and_validate():
             mimic_tensor = np.load(mimic_tensor_file)
             
             mimic_neq_raw = mimic_tensor[:, :, neq_idx].flatten()
-            mimic_neq_active = mimic_neq_raw[mimic_neq_raw > 0]
-            eicu_neq_active = df_final.filter(pl.col("valuenum") > 0)["valuenum"].to_numpy()
+            # Filter out NaNs to only evaluate true charted events
+            mimic_neq_active = mimic_neq_raw[~np.isnan(mimic_neq_raw) & (mimic_neq_raw > 0)]
+            
+            # [FIX] Filter to Acute 24h Window (0 to 1440 mins) to match MIMIC Tensor
+            print("    -> Filtering eICU to 24h acute window & Binning into hourly Sum of Maxes...")
+            df_eicu_hourly = df_final.filter(
+                (pl.col("event_time") >= 0) & (pl.col("event_time") < 1440)
+            ).with_columns(
+                (pl.col("event_time") / 60.0).floor().cast(pl.Int32).alias("hour_bin")
+            ).group_by(["stay_id", "hour_bin"]).agg(
+                pl.col("neq_from_ne").max().alias("max_ne"),
+                pl.col("neq_from_epi").max().alias("max_epi"),
+                pl.col("neq_from_phenyl").max().alias("max_phenyl"),
+                pl.col("neq_from_dopa").max().alias("max_dopa"),
+                pl.col("neq_from_vaso").max().alias("max_vaso")
+            ).with_columns(
+                (pl.col("max_ne").fill_null(0) + 
+                 pl.col("max_epi").fill_null(0) + 
+                 pl.col("max_phenyl").fill_null(0) + 
+                 pl.col("max_dopa").fill_null(0) + 
+                 pl.col("max_vaso").fill_null(0)).alias("hourly_sum_of_maxes")
+            )
+            
+            eicu_neq_active = df_eicu_hourly.filter(pl.col("hourly_sum_of_maxes") > 0)["hourly_sum_of_maxes"].to_numpy()
             
             mimic_median = np.median(mimic_neq_active)
             eicu_median = np.median(eicu_neq_active)
-            print(f"        - MIMIC Active NEQ Median: {mimic_median:.3f}")
-            print(f"        - eICU Active NEQ Median : {eicu_median:.3f}")
+            print(f"        - MIMIC Active NEQ Median (Raw Hourly Max): {mimic_median:.3f}")
+            print(f"        - eICU Active NEQ Median (Raw Hourly Max) : {eicu_median:.3f}")
             
             plt.figure(figsize=(10, 6))
             sns.kdeplot(mimic_neq_active, log_scale=True, fill=True, label=f"MIMIC-IV (Median: {mimic_median:.3f})", color="#4C72B0")
             sns.kdeplot(eicu_neq_active, log_scale=True, fill=True, label=f"eICU (Median: {eicu_median:.3f})", color="#C44E52")
-            plt.title("Feature Equivalence: NEQ Distribution (Active Infusions Only)", weight="bold")
+            plt.title("Feature Equivalence: NEQ Distribution (Raw Hourly Sum of Maxes)", weight="bold")
             plt.xlabel("Norepinephrine Equivalent Dose (mcg/kg/min) [Log Scale]")
             plt.ylabel("Density")
             plt.legend()
@@ -172,15 +198,17 @@ def compute_neq_and_validate():
         "Mathematical_Conversion": "Brown et al. (2013) Pure Implementation",
         "eICU_Treated_Events": len(df_final),
         "eICU_Max_Concurrent_Pressors": int(max_concurrent),
-        "eICU_Median_NEQ": float(dist_treated[0]),
-        "MIMIC_Median_NEQ": float(mimic_median) if 'mimic_median' in locals() else None,
+        "eICU_Median_NEQ_Raw": float(dist_treated[0]),
+        "eICU_Median_NEQ_Hourly_Max": float(eicu_median) if 'eicu_median' in locals() else None,
+        "MIMIC_Median_NEQ_Hourly_Max": float(mimic_median) if 'mimic_median' in locals() else None,
         "Distribution_Checked": True,
-        "Drift_Warning": bool('mimic_median' in locals() and abs(mimic_median - float(dist_treated[0])) > 0.1)
+        "Drift_Warning": bool('mimic_median' in locals() and 'eicu_median' in locals() and abs(mimic_median - eicu_median) > 0.1)
     }
     
     with open(equiv_report_file, "w") as f:
         json.dump(report, f, indent=4)
 
+    # Export the raw timeline for downstream use
     df_final.select([
         "stay_id", "event_time", "itemid", "valuenum",
         "neq_from_ne", "neq_from_epi", "neq_from_phenyl", "neq_from_dopa", "neq_from_vaso"

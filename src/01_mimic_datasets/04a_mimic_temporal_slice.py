@@ -6,7 +6,9 @@ Extracts vitals, labs, vasopressor administration, urine output, and mechanical 
 
 Features included:
 - Raw vasopressors (Norepi, Epi, Dopa, Dobutamine, Vasopressin, Phenylephrine) are 
-  passed through natively to support strict SOFA scoring (reverting artificial NEQ grouping).
+  passed through natively to support strict SOFA scoring.
+- Enforces strict Pharmacological standardization inline (mcg/kg/min, or units/min for Vaso)
+  using an 80kg fallback to prevent massive NEQ inflation from 'units/hour' or 'mcg/min'.
 - Urine Output extraction from the `outputevents` table.
 - Augmented Mechanical Ventilation extraction that includes both `procedureevents` 
   and `chartevents` (e.g., PEEP charting) to prevent false negatives.
@@ -115,9 +117,20 @@ def main():
             'vaso' AS data_type,
             i.starttime AS event_time,
             i.itemid,
-            -- Normalize rate to mcg/kg/min if patient weight is used
+            -- [FIX]: Rigorous Pharmacological standardization 
             CASE 
-                WHEN i.rateuom = 'mcg/min' AND i.patientweight > 0 THEN (i.rate / i.patientweight)
+                -- Vasopressin (222315) MUST be units/min
+                WHEN i.itemid = 222315 AND lower(i.rateuom) = 'units/hour' THEN (i.rate / 60.0)
+                WHEN i.itemid = 222315 AND lower(i.rateuom) = 'units/min' THEN i.rate
+                
+                -- Catecholamines MUST be mcg/kg/min (Using 80kg fallback for missing weights)
+                WHEN lower(i.rateuom) = 'mcg/min' THEN 
+                    CASE WHEN i.patientweight > 0 THEN (i.rate / i.patientweight) ELSE (i.rate / 80.0) END
+                WHEN lower(i.rateuom) = 'mg/min' THEN 
+                    CASE WHEN i.patientweight > 0 THEN ((i.rate * 1000.0) / i.patientweight) ELSE ((i.rate * 1000.0) / 80.0) END
+                WHEN lower(i.rateuom) = 'mcg/kg/min' THEN i.rate
+                
+                -- Fallback for extreme anomalies
                 ELSE i.rate
             END AS valuenum
         FROM read_csv_auto('{MIMIC_DIR}/icu/inputevents.csv.gz') i
@@ -127,7 +140,6 @@ def main():
           AND i.rate IS NOT NULL
           AND i.rate > 0
           AND i.itemid IN ({vaso_itemids})
-          AND i.rateuom IN ('mcg/min', 'mcg/kg/min', 'units/hour', 'units/min') 
     ),
     sliced_uo AS (
         SELECT 
@@ -191,7 +203,7 @@ def main():
     print("[*] Streaming multi-table temporal slice (-48h to +48h from SIT)...")
     print("    - Extracting targeted vitals (chartevents)")
     print("    - Extracting targeted labs (labevents)")
-    print("    - Extracting raw vasopressor therapies (inputevents)")
+    print("    - Extracting raw vasopressor therapies (inputevents) with strict unit normalization")
     print("    - Extracting urine output (outputevents)")
     print("    - Extracting mechanical ventilation statuses (procedureevents + chartevents)")
     
