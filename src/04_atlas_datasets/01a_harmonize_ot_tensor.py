@@ -10,7 +10,8 @@ Methodological Notes:
 - Uses Sinkhorn Optimal Transport (POT library) to map eICU's 124D feature distributions 
   into MIMIC-IV's latent space, aligning the domains prior to Atlas projection.
 - StandardScaler is applied to the 124D vectors to prevent geometric distortion in OT.
-- The learned scaler is saved alongside the OT mapper to ensure reproducibility.
+- [CRITICAL FIX]: Strictly aligns cohort metadata to the exact tensor array order using 
+  stay_id merges to prevent label misalignment.
 """
 
 import time
@@ -58,19 +59,28 @@ def main():
     start_time = time.time()
 
     # ---------------------------------------------------------
-    # 1. LOAD DATASETS
+    # 1. LOAD DATASETS & ENFORCE ALIGNMENT
     # ---------------------------------------------------------
     print("    -> Loading MIMIC-IV (Source) and eICU (Target) Imputed Tensors...")
     try:
+        # MIMIC
         X_mimic_3d = np.load(PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy")
         ids_mimic = np.load(PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy", allow_pickle=True)
         X_static_mimic = np.load(PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_static.npy", allow_pickle=True)
-        df_mimic = pl.read_parquet(PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet").to_pandas()
+        df_mimic_raw = pl.read_parquet(PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet").to_pandas()
+        
+        # [FIX] Force Metadata Order to Match Tensor ID Order
+        df_mimic = pd.DataFrame({"stay_id": ids_mimic}).merge(df_mimic_raw, on="stay_id", how="left")
 
+        # eICU
         X_eicu_3d = np.load(PROCESSED_DIR_EICU / "eicu_sepsis_imputed_tensor.npy")
         ids_eicu = np.load(PROCESSED_DIR_EICU / "eicu_sepsis_tensor_stay_ids.npy", allow_pickle=True)
         X_static_eicu = np.load(PROCESSED_DIR_EICU / "eicu_sepsis_tensor_static.npy", allow_pickle=True)
-        df_eicu = pl.read_parquet(PROCESSED_DIR_EICU / "eicu_final_sepsis3_cohort.parquet").to_pandas()
+        df_eicu_raw = pl.read_parquet(PROCESSED_DIR_EICU / "eicu_final_sepsis3_cohort.parquet").to_pandas()
+        
+        # [FIX] Force Metadata Order to Match Tensor ID Order
+        df_eicu = pd.DataFrame({"stay_id": ids_eicu}).merge(df_eicu_raw, on="stay_id", how="left")
+        
     except Exception as e:
         print(f"[ERROR] Failed to load processed data arrays. Error: {e}")
         return

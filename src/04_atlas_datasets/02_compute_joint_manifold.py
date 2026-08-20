@@ -4,10 +4,12 @@
 Projects the high-dimensional prognostic feature space into a 2D manifold.
 
 Features included:
-- Loads the pre-computed, OT-harmonized 124D feature matrix (120 temporal aggregates + 4 static).
-- Applies StandardScaler to ensure geometric stability before diffusion.
-- Fits the PHATE embedding to visualize continuous severity trajectories and structural branches.
-- Computes Silhouette mixing scores to mathematically validate the manifold geometry.
+- Loads the pre-computed, OT-harmonized 124D feature matrix.
+- Applies StandardScaler to ensure geometric stability.
+- Applies pre-diffusion PCA (n_pca=50) to denoise the 124D space, 
+  resolving the SGD-MDS convergence warnings and stabilizing the topology.
+- Fits the PHATE embedding to visualize continuous severity trajectories.
+- Computes Silhouette mixing scores to mathematically validate cohort mixing.
 """
 
 import time
@@ -72,11 +74,13 @@ def main():
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_124)
 
-    print("    -> Fitting PHATE Manifold (n_components=2)...")
+    print("    -> Fitting PHATE Manifold (n_components=2, n_pca=50)...")
     print("       (Computing dense diffusion probabilities. This may take 1-3 minutes...)")
     
+    # Adding n_pca=50 smooths the distance matrix and prevents SGD-MDS convergence failures
     phate_operator = phate.PHATE(
         n_components=2, 
+        n_pca=50,
         knn=40,
         decay=20,
         n_jobs=-1, 
@@ -103,7 +107,7 @@ def main():
     sil_mortality = silhouette_score(X_phate_sample, mortality_labels)
     
     print(f"       - Cohort Mixing Silhouette  : {sil_cohort:.4f} (Ideal is ~0)")
-    print(f"       - Mortality Gradients       : {sil_mortality:.4f} (Negative/Low implies continuous gradient)")
+    print(f"       - Mortality Gradients       : {sil_mortality:.4f} (Negative implies lack of discrete clusters)")
 
     # ---------------------------------------------------------
     # 4. EXPORT
@@ -121,10 +125,10 @@ def main():
     metrics = {
         "Manifold_Algorithm": "PHATE",
         "Feature_Representation": "124-Feature Prognostic Vector (OT Harmonized)",
-        "Parameters": {"knn": 40, "decay": 20},
+        "Parameters": {"n_pca": 50, "knn": 40, "decay": 20},
         "Cohort_Silhouette_Score": float(sil_cohort),
         "Mortality_Silhouette_Score": float(sil_mortality),
-        "Interpretation": "Cohort score near 0 confirms perfect spatial overlap. Negative/low mortality score confirms continuous clinical severity gradients rather than detached islands."
+        "Interpretation": "Cohort score near 0 confirms spatial overlap of cohorts (batch effect mitigation). Negative mortality score confirms severity is distributed as a continuous gradient rather than detached discrete clusters."
     }
     
     with open(MIXING_METRICS_FILE, "w") as f:

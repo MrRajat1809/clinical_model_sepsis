@@ -67,6 +67,9 @@ def main():
     df_meta = pd.read_parquet(ATLAS_META_FILE)
     X_124 = np.load(ATLAS_FEATURES_FILE)
     
+    # [DEFENSIVE CHECK] Ensure perfect row alignment before plotting
+    assert len(df_coords) == len(df_meta) == len(X_124), "CRITICAL: Row dimensions mismatch across Atlas artifacts!"
+    
     # Load base feature names
     features_30 = list(np.load(PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_features.npy", allow_pickle=True))
 
@@ -91,7 +94,6 @@ def main():
     idx_verbal = get_feature_index(features_30, "verbal")
 
     # In 124D: [0-29: Mean], [30-59: Min], [60-89: Max], [90-119: Std], [120-123: Static]
-    # If a feature isn't found (fallback), we will map it to zeros.
     def extract_val(base_idx, offset):
         if base_idx is not None:
             return X_124[:, base_idx + offset]

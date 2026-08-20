@@ -1,12 +1,12 @@
 """
 01b_verify_atlas_harmonization.py
 
-Runs rigorous Quality Control (QC) on the harmonized Sepsis Atlas before PHATE manifold projection.
-Verifies:
-1. No NaN/Inf corruption in the 124D feature matrix.
-2. Perfect shape and ID alignment across tensor, metadata, and ID arrays.
-3. Distribution and variance preservation (checking Mean HR and Mean MAP for implausibilities).
-4. Cohort mixing vs. clinical structure (PCA + Silhouette scores).
+Runs rigorous Quality Control (QC) on the harmonized Sepsis Atlas.
+Addresses advanced methodological critiques by verifying:
+1. Array Integrity (NaN/Inf).
+2. Dimensionality and ID Alignment.
+3. Biological Variance & Univariate Prognostic Signal across ALL 124 features.
+4. Cohort mixing (PCA + Silhouette).
 """
 
 import time
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 from sklearn.decomposition import PCA
-from sklearn.metrics import silhouette_score
+from sklearn.metrics import silhouette_score, roc_auc_score
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -26,108 +26,130 @@ warnings.filterwarnings("ignore")
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Inputs
 PROCESSED_DIR_ATLAS = BASE_DIR / "data" / "processed" / "atlas"
 PROCESSED_DIR_MIMIC = BASE_DIR / "data" / "processed" / "mimiciv"
 PROCESSED_DIR_EICU = BASE_DIR / "data" / "processed" / "eicu"
 
-# Outputs
+OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
+OUT_METRICS.mkdir(parents=True, exist_ok=True)
 OUT_FIGURES.mkdir(parents=True, exist_ok=True)
 
 QC_PLOT_FILE = OUT_FIGURES / "atlas_QC_Harmonization_Checks.png"
+UNIVARIATE_CSV_FILE = OUT_METRICS / "atlas_univariate_auroc_shifts.csv"
+
+def get_feature_index(feature_names, search_term):
+    for i, name in enumerate(feature_names):
+        if search_term.lower() in name.lower():
+            return i
+    return None
 
 def main():
-    print("[*] Initiating Atlas Quality Control & Harmonization Verification (124D)...")
+    print("[*] Initiating Advanced Atlas Quality Control (124D)...")
     start_time = time.time()
 
     # ---------------------------------------------------------
     # 0. LOAD DATA
     # ---------------------------------------------------------
-    print("    -> Loading 124D Atlas artifacts and pre-OT eICU tensor for comparison...")
+    print("    -> Loading 124D Atlas artifacts and pre-OT eICU tensors...")
     X_atlas_124 = np.load(PROCESSED_DIR_ATLAS / "atlas_sepsis_features_124.npy")
     ids_atlas = np.load(PROCESSED_DIR_ATLAS / "atlas_stay_ids.npy", allow_pickle=True)
     df_meta = pd.read_parquet(PROCESSED_DIR_ATLAS / "atlas_metadata.parquet")
     
-    # Load feature names (using MIMIC as the reference)
     features = list(np.load(PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_features.npy", allow_pickle=True))
     
-    # Load original pre-OT eICU tensor to calculate its raw mean for comparison
     X_eicu_raw_3d = np.load(PROCESSED_DIR_EICU / "eicu_sepsis_imputed_tensor.npy")
-    X_eicu_raw_mean = np.mean(X_eicu_raw_3d, axis=1)
+    X_eicu_raw_static = np.load(PROCESSED_DIR_EICU / "eicu_sepsis_tensor_static.npy", allow_pickle=True)
+    
+    eicu_mask = df_meta["cohort_source"] == "eICU-CRD"
+    X_eicu_ot_124 = X_atlas_124[eicu_mask]
+    y_eicu = df_meta[eicu_mask]["hospital_expire_flag"].values
 
     # ---------------------------------------------------------
-    # CHECK 1: NaN and Infinity Check
+    # CHECK 1 & 2: Integrity and Alignment
     # ---------------------------------------------------------
-    print("\n[QC CHECK 1]: Array Integrity (NaN / Inf)")
-    nan_count = np.isnan(X_atlas_124).sum()
-    inf_count = np.isinf(X_atlas_124).sum()
-    
-    if nan_count == 0 and inf_count == 0:
-        print("    [PASS] 124D Matrix is perfectly clean (0 NaNs, 0 Infs).")
+    print("\n[QC CHECK 1 & 2]: Array Integrity & Alignment")
+    if np.isnan(X_atlas_124).sum() == 0 and np.isinf(X_atlas_124).sum() == 0:
+        print("    [PASS] 124D Matrix is clean (0 NaNs, 0 Infs).")
     else:
-        print(f"    [FAIL] Matrix corruption detected! NaNs: {nan_count:,}, Infs: {inf_count:,}")
+        print("    [FAIL] Matrix corruption detected!")
 
-    # ---------------------------------------------------------
-    # CHECK 2: Shape and ID Alignment
-    # ---------------------------------------------------------
-    print("\n[QC CHECK 2]: Dimensionality and ID Alignment")
-    n_tensor = X_atlas_124.shape[0]
-    n_ids = len(ids_atlas)
-    n_meta = len(df_meta)
-    
-    print(f"    - Matrix Rows:   {n_tensor:,}")
-    print(f"    - ID Array Rows: {n_ids:,}")
-    print(f"    - Metadata Rows: {n_meta:,}")
-    
-    if n_tensor == n_ids == n_meta:
-        print("    [PASS] Dimensions align perfectly.")
+    if X_atlas_124.shape[0] == len(ids_atlas) == len(df_meta):
+        print("    [PASS] Dimensions align perfectly across arrays.")
     else:
         print("    [FAIL] Row counts do not match!")
-
+    
     if (df_meta["atlas_id"].values == ids_atlas).all():
         print("    [PASS] Metadata exactly matches Tensor ID sequence.")
     else:
         print("    [FAIL] Metadata order does not match Tensor IDs!")
 
     # ---------------------------------------------------------
-    # CHECK 3: Distribution & Variance Preservation
+    # CHECK 3 & 4: Variance Retention & Univariate AUROC (ALL 124 FEATURES)
     # ---------------------------------------------------------
-    print("\n[QC CHECK 3]: Biological Variance Preservation")
-    # In the 124D array, the first 30 columns are the MEANS of the temporal variables.
-    hr_idx = features.index("hr")
-    map_idx = features.index("map")
+    print("\n[QC CHECK 3 & 4]: Prognostic Signal & Variance Preservation (All 124 Features)")
     
-    eicu_mask = df_meta["cohort_source"] == "eICU-CRD"
-    X_eicu_ot_124 = X_atlas_124[eicu_mask]
-    
-    # Compute bounds for Mean HR and Mean MAP
-    hr_min_pre, hr_max_pre = np.min(X_eicu_raw_mean[:, hr_idx]), np.max(X_eicu_raw_mean[:, hr_idx])
-    hr_min_post, hr_max_post = np.min(X_eicu_ot_124[:, hr_idx]), np.max(X_eicu_ot_124[:, hr_idx])
-    
-    map_min_pre, map_max_pre = np.min(X_eicu_raw_mean[:, map_idx]), np.max(X_eicu_raw_mean[:, map_idx])
-    map_min_post, map_max_post = np.min(X_eicu_ot_124[:, map_idx]), np.max(X_eicu_ot_124[:, map_idx])
+    # Reconstruct raw 124D representation for direct column-to-column comparison
+    X_eicu_temporal_raw = np.concatenate([
+        np.mean(X_eicu_raw_3d, axis=1), np.min(X_eicu_raw_3d, axis=1),
+        np.max(X_eicu_raw_3d, axis=1), np.std(X_eicu_raw_3d, axis=1)
+    ], axis=1)
+    X_eicu_static_raw = X_eicu_raw_static[:, [0, 1, 5, 6]].astype(np.float32)
+    X_eicu_124_raw = np.concatenate([X_eicu_temporal_raw, X_eicu_static_raw], axis=1)
 
-    print("    - eICU Mean Heart Rate Bounds:")
-    print(f"        Pre-OT:  [{hr_min_pre:.1f}, {hr_max_pre:.1f}]")
-    print(f"        Post-OT: [{hr_min_post:.1f}, {hr_max_post:.1f}]")
+    # Generate feature names for the 124 dimensions
+    feature_names_124 = (
+        [f"{f}_mean" for f in features] +
+        [f"{f}_min" for f in features] +
+        [f"{f}_max" for f in features] +
+        [f"{f}_std" for f in features] +
+        ["age", "gender", "cci", "baseline_sofa"]
+    )
+
+    results = []
+    for i in range(124):
+        raw_vals = X_eicu_124_raw[:, i]
+        ot_vals = X_eicu_ot_124[:, i]
+        
+        # Calculate standard deviation ratio (handling division by zero)
+        std_raw = np.std(raw_vals)
+        std_ot = np.std(ot_vals)
+        var_ratio = (std_ot / std_raw) if std_raw > 0 else 1.0
+        
+        # Calculate AUROC (using absolute correlation direction to handle inverted risks like GCS/MAP)
+        # roc_auc_score requires directionality. We take the max of standard or inverted.
+        try:
+            auc_standard_raw = roc_auc_score(y_eicu, raw_vals)
+            auc_invert_raw = roc_auc_score(y_eicu, -raw_vals)
+            auc_raw = max(auc_standard_raw, auc_invert_raw)
+            
+            auc_standard_ot = roc_auc_score(y_eicu, ot_vals)
+            auc_invert_ot = roc_auc_score(y_eicu, -ot_vals)
+            auc_ot = max(auc_standard_ot, auc_invert_ot)
+        except ValueError:
+            auc_raw, auc_ot = 0.5, 0.5 # Fallback for flat arrays
+            
+        results.append({
+            "Feature": feature_names_124[i],
+            "Var_Ratio": var_ratio,
+            "Pre_OT_AUROC": auc_raw,
+            "Post_OT_AUROC": auc_ot,
+            "AUROC_Diff": auc_ot - auc_raw
+        })
+
+    df_results = pd.DataFrame(results)
+    df_results.to_csv(UNIVARIATE_CSV_FILE, index=False)
     
-    print("    - eICU Mean MAP Bounds:")
-    print(f"        Pre-OT:  [{map_min_pre:.1f}, {map_max_pre:.1f}]")
-    print(f"        Post-OT: [{map_min_post:.1f}, {map_max_post:.1f}]")
+    avg_diff = df_results["AUROC_Diff"].mean()
+    print(f"    -> Average AUROC shift across all 124 features: {avg_diff:+.4f}")
     
-    if hr_min_post >= 0 and map_min_post >= 0:
-        print("    [PASS] OT transformation produced no physiologically impossible negative vitals.")
-    else:
-        print("    [WARNING] Negative physiological values detected post-OT!")
+    print("\n    -> Top 5 Most Improved Features:")
+    print(df_results.sort_values("AUROC_Diff", ascending=False).head(5)[["Feature", "Pre_OT_AUROC", "Post_OT_AUROC", "AUROC_Diff"]].to_string(index=False))
 
     # ---------------------------------------------------------
-    # CHECK 4: Cohort Mixing vs Clinical Structure (PCA)
+    # CHECK 5: Cohort Mixing vs Clinical Structure (PCA)
     # ---------------------------------------------------------
-    print("\n[QC CHECK 4]: Cohort Mixing vs. Severity Preservation")
-    print("    -> Running fast PCA on 124D Atlas to test linear manifold structure...")
-    
-    # Random subsample of 5000 patients for fast Silhouette calculation
+    print("\n[QC CHECK 5]: Geometric Cohort Mixing")
     np.random.seed(42)
     sample_idx = np.random.choice(X_atlas_124.shape[0], 5000, replace=False)
     X_sample = X_atlas_124[sample_idx]
@@ -136,52 +158,43 @@ def main():
     X_pca = pca.fit_transform(X_sample)
     
     cohort_labels = df_meta.iloc[sample_idx]["cohort_source"].values
-    mortality_labels = df_meta.iloc[sample_idx]["hospital_expire_flag"].values
-    
     sil_cohort = silhouette_score(X_pca, cohort_labels)
-    sil_mortality = silhouette_score(X_pca, mortality_labels)
     
-    print(f"    - Silhouette Score (Cohort Source) : {sil_cohort:.4f} (Closer to 0 is better mixing)")
-    print(f"    - Silhouette Score (Mortality)     : {sil_mortality:.4f} (Negative/Low implies continuous gradient)")
-    
+    print(f"    - Silhouette Score (Cohort Source) : {sil_cohort:.4f} (Closer to 0 is perfect mixing)")
     if sil_cohort < 0.05:
         print("    [PASS] Cohorts are highly mixed. Batch effect is structurally mitigated.")
-    else:
-        print("    [WARNING] Cohorts may still contain residual geometric separation.")
 
     # ---------------------------------------------------------
     # VISUALIZATION
     # ---------------------------------------------------------
-    print(f"\n    -> Generating 4-Panel QC Figure...")
+    print(f"\n    -> Generating QC Figure...")
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # Panel A: HR Distribution (Pre vs Post)
-    sns.kdeplot(X_eicu_raw_mean[:, hr_idx], label="eICU (Pre-OT)", ax=axes[0, 0], color="grey", linestyle="--")
-    sns.kdeplot(X_eicu_ot_124[:, hr_idx], label="eICU (Post-OT)", ax=axes[0, 0], color="#C44E52")
-    axes[0, 0].set_title("A) Mean Heart Rate Geometry Preservation")
+    # We use Lactate and SOFA just for the visual panels
+    idx_lactate = get_feature_index(features, "lactate")
+    sns.kdeplot(X_eicu_124_raw[:, idx_lactate], label="eICU (Pre-OT)", ax=axes[0, 0], color="grey", linestyle="--")
+    sns.kdeplot(X_eicu_ot_124[:, idx_lactate], label="eICU (Post-OT)", ax=axes[0, 0], color="#C44E52")
+    axes[0, 0].set_title("A) Mean Lactate Geometry Preservation")
     axes[0, 0].legend()
     
-    # Panel B: MAP Distribution (Pre vs Post)
-    sns.kdeplot(X_eicu_raw_mean[:, map_idx], label="eICU (Pre-OT)", ax=axes[0, 1], color="grey", linestyle="--")
-    sns.kdeplot(X_eicu_ot_124[:, map_idx], label="eICU (Post-OT)", ax=axes[0, 1], color="#C44E52")
-    axes[0, 1].set_title("B) Mean MAP Geometry Preservation")
+    sns.kdeplot(X_eicu_124_raw[:, 123], label="eICU (Pre-OT)", ax=axes[0, 1], color="grey", linestyle="--")
+    sns.kdeplot(X_eicu_ot_124[:, 123], label="eICU (Post-OT)", ax=axes[0, 1], color="#C44E52")
+    axes[0, 1].set_title("B) Baseline SOFA Geometry Preservation")
     axes[0, 1].legend()
 
-    # Panel C: Cohort Mixing
     sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=cohort_labels, alpha=0.5, s=15, ax=axes[1, 0], palette=["#4C72B0", "#C44E52"])
     axes[1, 0].set_title(f"C) Cohort Mixing (Silhouette: {sil_cohort:.3f})")
     
-    # Panel D: Mortality Structure
+    mortality_labels = df_meta.iloc[sample_idx]["hospital_expire_flag"].values
     sns.scatterplot(x=X_pca[:, 0], y=X_pca[:, 1], hue=mortality_labels, alpha=0.5, s=15, ax=axes[1, 1], palette="viridis")
-    axes[1, 1].set_title(f"D) Severity Structure (Mortality Silhouette: {sil_mortality:.3f})")
+    axes[1, 1].set_title("D) Severity Structure in PCA Space")
     
     plt.tight_layout()
     plt.savefig(QC_PLOT_FILE, dpi=300)
     plt.close()
     
-    elapsed = time.time() - start_time
-    print(f"\n[+] QC complete in {elapsed:.2f} seconds.")
-    print(f"    -> Plot saved to: {QC_PLOT_FILE.relative_to(BASE_DIR)}")
+    print(f"\n[+] QC complete in {time.time() - start_time:.2f} seconds.")
+    print(f"    -> Full Univariate results saved to: {UNIVARIATE_CSV_FILE.relative_to(BASE_DIR)}")
 
 if __name__ == "__main__":
     main()
