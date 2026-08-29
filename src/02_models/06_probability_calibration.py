@@ -1,18 +1,28 @@
 """
-06_probability_calibration.py
+Internal probability calibration on MIMIC-IV.
 
-Phase 5: Probability Calibration
-Validates that the Champion XGBoost model produces clinically reliable risk estimates.
+Discrimination says whether the ranking is right; this asks whether the numbers
+can be read as probabilities. Run before any external work so that calibration
+drift observed in eICU can be attributed to the new environment rather than to a
+model that was never calibrated to begin with.
 
-Features included:
-- Loads the locked Champion model.
-- Uses Out-of-Fold (OOF) 5-fold CV predictions to fit calibrators without data leakage.
-- Converts probabilities to Logits for mathematically sound Platt Scaling.
-- Fits Platt Scaling and Isotonic Regression calibrators on the OOF predictions.
-- Calculates Optimal Decision Thresholds (Youden's J) on the unbiased OOF set.
-- Bootstraps AUROC, AUPRC, and Brier scores on the untouched test set.
-- Evaluates Sensitivity, Specificity, and F1 at the locked optimal threshold.
-- Exports publication-quality calibration curves and reliability histograms.
+Calibrators are fitted on out-of-fold predictions from five stratified folds of
+the development partition, never on the model's own training predictions, which
+would be optimistic. Two are compared: Platt scaling on the logit, and isotonic
+regression on the probability.
+
+Decision thresholds are chosen on the same out-of-fold predictions by Youden's J
+and locked before the test set is touched, so neither the calibrator nor the
+threshold sees the evaluation data.
+
+Reports AUROC, AUPRC, Brier, calibration slope and intercept, and expected
+calibration error over ten bins, with paired bootstrap differences in Brier.
+
+Reads:
+    outputs/models/mimic_champion_xgboost.joblib, the shared split indices
+Writes:
+    outputs/models/mimic_{platt, isotonic}_calibrator.joblib
+    outputs/metrics/mimic_calibration_summary.json, curves and plot data
 """
 
 import time
@@ -39,14 +49,11 @@ from sklearn.calibration import calibration_curve
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Output target directories based on strict artifact taxonomy
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -63,9 +70,7 @@ def set_seed(seed):
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-# ==========================================
-# METRIC HELPERS
-# ==========================================
+# --- Metric Helpers ------------------------------------------------------
 def find_optimal_threshold(y_true, y_prob):
     """Calculates Youden's J statistic optimal threshold."""
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
@@ -110,17 +115,13 @@ def compute_slope_intercept(y_true, y_prob):
     
     return lr.coef_[0][0], lr.intercept_[0]
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 5: Probability Calibration & Threshold Optimization...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD CHAMPION MODEL & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Champion Model & Splits ------------------------------------
     champion_model_file = OUT_MODELS / "mimic_champion_xgboost.joblib"
     if not champion_model_file.exists():
         print(f"[ERROR] Champion model not found at {champion_model_file}.")
@@ -140,14 +141,10 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT & SCALE FEATURES
-    # ---------------------------------------------------------
+    # --- Extract & Scale Features ----------------------------------------
     print("    -> Constructing feature space...")
-    static_cols = [col for col in ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"] if col in df_cohort.columns]
+    static_cols = [col for col in ["age", "baseline_sofa"] if col in df_cohort.columns]
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     scaler_static = StandardScaler().fit(df_static.fillna(0).values[idx_train_val])
     X_static = scaler_static.transform(df_static.fillna(0).values)
@@ -163,9 +160,7 @@ def main():
     X_train_val, y_train_val = X_fused[idx_train_val], y[idx_train_val]
     X_test, y_test = X_fused[idx_test], y[idx_test]
 
-    # ---------------------------------------------------------
-    # 3. OUT-OF-FOLD (OOF) PREDICTIONS FOR UNBIASED CALIBRATION
-    # ---------------------------------------------------------
+    # --- Out-of-fold (oof) Predictions for Unbiased Calibration ----------
     print("    -> Generating Out-of-Fold (OOF) predictions to prevent calibration data leakage...")
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
     preds_calib_uncal = cross_val_predict(
@@ -178,9 +173,7 @@ def main():
     print("    -> Generating Champion predictions on the unseen test set...")
     preds_test_uncal = champion_xgb.predict_proba(X_test)[:, 1]
 
-    # ---------------------------------------------------------
-    # 4. FIT CALIBRATORS & FIND OPTIMAL THRESHOLDS
-    # ---------------------------------------------------------
+    # --- Fit Calibrators & Find Optimal Thresholds -----------------------
     print("    -> Fitting Platt Scaling (on logits) & Isotonic Regression...")
     eps = 1e-15
     logits_calib_uncal = logit(np.clip(preds_calib_uncal, eps, 1 - eps)).reshape(-1, 1)
@@ -213,9 +206,7 @@ def main():
     joblib.dump(platt_calibrator, OUT_MODELS / "mimic_platt_calibrator.joblib")
     joblib.dump(iso_calibrator, OUT_MODELS / "mimic_isotonic_calibrator.joblib")
 
-    # ---------------------------------------------------------
-    # 5. PAIRED BOOTSTRAP STATISTICAL TESTING
-    # ---------------------------------------------------------
+    # --- Paired Bootstrap Statistical Testing ----------------------------
     print(f"    -> Running {N_BOOTSTRAPS}-Iteration Bootstrap Evaluation...")
     rng = np.random.default_rng(RANDOM_STATE)
     
@@ -249,9 +240,7 @@ def main():
         boot_diffs["Uncal_vs_Iso"].append(boot_results["Uncalibrated"]["brier"][-1] - boot_results["Isotonic"]["brier"][-1])
         boot_diffs["Platt_vs_Iso"].append(boot_results["Platt"]["brier"][-1] - boot_results["Isotonic"]["brier"][-1])
 
-    # ---------------------------------------------------------
-    # 6. COMPILE COMPREHENSIVE METRICS
-    # ---------------------------------------------------------
+    # --- Compile Comprehensive Metrics -----------------------------------
     summary_metrics = {}
     for name, preds in models.items():
         slope, intercept = compute_slope_intercept(y_test, preds)
@@ -276,9 +265,7 @@ def main():
             "ECE": ece
         }
 
-    # ---------------------------------------------------------
-    # 7. EXPORT PREDICTIONS
-    # ---------------------------------------------------------
+    # --- Export Predictions ----------------------------------------------
     print("    -> Exporting calibrated predictions...")
     df_preds = pd.DataFrame({
         "stay_id": stay_ids_test,
@@ -289,9 +276,7 @@ def main():
     })
     df_preds.to_csv(OUT_PREDS / "mimic_calibrated_predictions.csv", index=False)
 
-    # ---------------------------------------------------------
-    # 8. EXPORT CALIBRATION PLOT DATA & FIGURE
-    # ---------------------------------------------------------
+    # --- Export Calibration Plot Data & Figure ---------------------------
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 10), gridspec_kw={'height_ratios': [2, 1]})
     ax1.plot([0, 1], [0, 1], "k:", label="Perfectly Calibrated")
     
@@ -323,9 +308,7 @@ def main():
     # Save curve data for external plotting
     pd.DataFrame(dict([ (k,pd.Series(v)) for k,v in plot_data_curves.items() ])).to_csv(OUT_PLOT_DATA / "mimic_calibration_curve_data.csv", index=False)
 
-    # ---------------------------------------------------------
-    # 9. JSON EXPORT & PRINT RESULTS
-    # ---------------------------------------------------------
+    # --- Json Export & Print Results -------------------------------------
     with open(OUT_METRICS / "mimic_calibration_summary.json", "w") as f:
         json.dump({"Champion": "Static_Aggregated", "Metrics": summary_metrics}, f, indent=4)
 

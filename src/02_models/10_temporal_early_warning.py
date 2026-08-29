@@ -1,14 +1,23 @@
 """
-10_temporal_early_warning.py
+How early the prognostic signal becomes available, measured internally.
 
-Clinical Actionability (Lead-Time Bias / Temporal Slicing Analysis)
-Evaluates how early the Champion XGBoost model achieves high predictive power.
+Rebuilds the feature representation from cumulative windows of 6, 12, 18 and
+24 hours after sepsis onset and refits the primary architecture on each, so the
+question is how much of the final performance is present after only part of the
+first day.
 
-Features included:
-- Slices the 3D tensor into cumulative time windows: 6h, 12h, 18h, 24h.
-- Extracts static + temporal aggregations (Mean, Min, Max, Std) for each slice.
-- Retrains and evaluates the model using the locked Champion hyperparameters.
-- Generates a 'Time-to-Accuracy' curve to prove early clinical actionability.
+Only the temporal summaries change between windows; static variables are
+constant. Each window gets its own scaler fitted on the development partition,
+because the distribution of a six-hour maximum is not that of a 24-hour maximum.
+
+Trains on the development partition and evaluates on the held-out MIMIC-IV test
+set. The eICU counterpart (03_eicu_datasets/12) repeats this externally.
+
+Reads:
+    outputs/metrics/mimic_champion_metrics.json for the hyperparameters
+    mimic_sepsis_imputed_tensor.npy, the shared split indices
+Writes:
+    outputs/metrics/mimic_temporal_early_warning_metrics.json, and a plot
 """
 
 import json
@@ -25,31 +34,26 @@ from xgboost import XGBClassifier
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Flattened Data Directories
 PROCESSED_DIR_MIMIC = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
-# Inputs
 CHAMPION_METRICS = OUT_METRICS / "mimic_champion_metrics.json"
 
 MIMIC_TENSOR = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_IDS = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
 MIMIC_COHORT = PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet"
 
-# [FIX]: Pointed to OUT_MODELS and correct test set filename
+# Pointed to OUT_MODELS and correct test set filename
 MIMIC_TRAIN_IDX = OUT_MODELS / "mimic_train_indices.npy"
 MIMIC_TEST_IDX = OUT_MODELS / "mimic_test_set_indices.npy"
 
-# Outputs
 OUT_PLOT = OUT_FIGURES / "mimic_temporal_early_warning.png"
 OUT_JSON = OUT_METRICS / "mimic_temporal_early_warning_metrics.json"
 
@@ -92,12 +96,10 @@ def main():
     y = df_cohort["hospital_expire_flag"].values
     
     # 3. Process Static Features (Constant across all time windows)
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     X_static_raw = df_static.fillna(0).values
     
@@ -119,7 +121,13 @@ def main():
         X_max = np.max(X_slice, axis=1)
         X_std = np.std(X_slice, axis=1)
         
-        X_temporal_agg = StandardScaler().fit_transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
+        X_temporal_raw = np.concatenate([X_mean, X_min, X_max, X_std], axis=1)
+        
+        # Fit temporal scaler ONLY on train_val subset
+        scaler_temporal = StandardScaler()
+        scaler_temporal.fit(X_temporal_raw[idx_train_val])
+        X_temporal_agg = scaler_temporal.transform(X_temporal_raw)
+        
         X_fused = np.concatenate([X_static, X_temporal_agg], axis=1)
         
         X_train_val, y_train_val = X_fused[idx_train_val], y[idx_train_val]

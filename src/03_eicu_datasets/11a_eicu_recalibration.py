@@ -1,11 +1,25 @@
 """
-11a_eicu_recalibration.py
+External probability recalibration for the full model.
 
-External Recalibration & Deep Metric Analysis
+Discrimination can survive a move between health systems while the probabilities
+themselves drift, because prevalence and case mix differ. This asks whether the
+ranking is intact but the scale is wrong, which is correctable, or whether the
+model has genuinely failed.
 
-Features included:
-- Eliminates data leak by calculating Optimal Decision Thresholds (Youden's J) 
-  strictly on the 80% Calibration Set and applying them to the 20% Test Set.
+The eICU predictions are split 80/20, stratified by outcome. Platt scaling and
+isotonic regression are fitted on the calibration portion only, and decision
+thresholds are chosen there by Youden's J and locked before the held-out 20
+percent is scored. Neither the calibrator nor the threshold ever sees the
+evaluation data.
+
+Comparing AUROC before and after recalibration is diagnostic: a monotone
+recalibration cannot change ranking, so an unchanged AUROC alongside an improved
+Brier score is the signature of pure calibration drift.
+
+Reads:
+    outputs/metrics/eicu_champion_predictions.csv
+Writes:
+    outputs/metrics/eicu_calibration_metrics.json and a reliability diagram
 """
 
 import warnings
@@ -27,16 +41,12 @@ from scipy.special import logit
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Global Outputs
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
-# Files
 PREDS_FILE = OUT_METRICS / "eicu_champion_predictions.csv"
 PLOT_FILE = OUT_FIGURES / "eicu_calibration_curve.png"
 METRICS_FILE = OUT_METRICS / "eicu_calibration_metrics.json"

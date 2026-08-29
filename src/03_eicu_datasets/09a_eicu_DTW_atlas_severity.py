@@ -1,14 +1,18 @@
 """
-09a_eicu_DTW_atlas_severity.py
+Pairwise DTW distance matrix preserving absolute severity, eICU cohort.
 
-Computes the pairwise Dynamic Time Warping (DTW) distance matrix for the fully imputed 
-eICU 3D time-series tensor based on ABSOLUTE CLINICAL STATE (Severity).
+Severity counterpart to 08a. A single global scaler across all patients and
+hours equalises the contribution of each variable while preserving how sick each
+patient actually is, so proximity requires both similar shape and similar
+magnitude.
 
-Features included:
-- Applies a global 2D StandardScaler across all patients and timesteps. 
-  This ensures all physiological variables are weighted equally by the DTW distance metric, 
-  while preserving the absolute magnitude (severity) of the patient's condition.
-- Filenames explicitly designated with `_severity_` to prevent clashes with the Shape manifold.
+Same O(N^2) cost; runs from run_dtw_phate_atlas.sh.
+
+Reads:
+    eicu_sepsis_imputed_tensor.npy, eicu_sepsis_tensor_stay_ids.npy
+Writes:
+    outputs/features/eicu_dtw_severity_pairwise_distance_matrix.npy
+    outputs/features/eicu_severity_atlas_stay_ids.npy
 """
 
 import time
@@ -24,9 +28,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Flattened Inputs

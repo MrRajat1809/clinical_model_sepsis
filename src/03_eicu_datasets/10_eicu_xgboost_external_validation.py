@@ -1,15 +1,24 @@
 """
-10_eicu_xgboost_external_validation.py
+External validation of the primary model on eICU-CRD.
 
-Loads the locked Champion XGBoost model trained on MIMIC-IV and evaluates it 
-on the eICU external validation cohort.
+The headline transportability result. The locked MIMIC-IV model is applied to
+eICU with no retraining and no tuning, and no eICU outcome informs anything.
 
-Features included:
-- Strictly enforces external validation standards by PREVENTING any retraining on eICU data.
-- Dynamically reconstructs the MIMIC-IV StandardScalers to ensure the eICU data 
-  is transformed into the exact same statistical distribution space the trees were trained on.
-- Applies the exact Mean/Min/Max/Std aggregation logic used during the MIMIC-IV feature engineering.
-- Calculates AUROC, AUPRC, and Brier Score with 1000-iteration Bootstrapped 95% CIs.
+The MIMIC-IV standardisation is reconstructed from the development partition and
+applied unchanged, so the external features are expressed in the same
+statistical space the trees were grown in. The same mean/min/max/standard
+deviation aggregation is reapplied to the eICU tensor.
+
+Reports AUROC, AUPRC and Brier with 1000-resample bootstrap intervals, threshold
+metrics, and calibration slope and intercept. The predictions written here feed
+the recalibration, decision curve and fairness analyses.
+
+Reads:
+    outputs/models/mimic_champion_xgboost.joblib
+    eicu_sepsis_imputed_tensor.npy, eicu_final_sepsis3_cohort.parquet
+Writes:
+    outputs/metrics/eicu_champion_{metrics.json, predictions.csv}
+    ROC and precision-recall figure
 """
 
 import time
@@ -33,9 +42,7 @@ from scipy.special import logit
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Flattened Data Directories
@@ -57,13 +64,12 @@ MIMIC_TENSOR_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_imputed_tensor.npy"
 MIMIC_STAY_ID_FILE = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_stay_ids.npy"
 MIMIC_COHORT_FILE = PROCESSED_DIR_MIMIC / "mimic_final_sepsis3_cohort.parquet"
 
-# [FIX]: Train indices are located in OUT_MODELS
+# Train indices are located in OUT_MODELS
 MIMIC_TRAIN_IDX_FILE = OUT_MODELS / "mimic_train_indices.npy"
 
-# [FIX]: Updated locked Champion Model Path
+# Updated locked Champion Model Path
 XGB_MODEL_FILE = OUT_MODELS / "mimic_champion_xgboost.joblib"
 
-# Outputs
 METRICS_FILE = OUT_METRICS / "eicu_champion_metrics.json"
 PREDS_FILE = OUT_METRICS / "eicu_champion_predictions.csv"
 ROC_PLOT_FILE = OUT_FIGURES / "eicu_Champion_ROC_PR.png"
@@ -71,9 +77,7 @@ ROC_PLOT_FILE = OUT_FIGURES / "eicu_Champion_ROC_PR.png"
 RANDOM_STATE = 42
 N_BOOTSTRAPS = 1000
 
-# ==========================================
-# EVALUATION HELPERS (Mirrored from Training)
-# ==========================================
+# --- EVALUATION HELPERS (Mirrored from Training) -------------------------
 def compute_calibration_metrics(y_true, y_prob):
     eps = 1e-15
     y_prob_clipped = np.clip(y_prob, eps, 1 - eps)
@@ -127,9 +131,7 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
         "Calibration_Intercept": float(cal_intercept)
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Initiating External Validation (Champion XGBoost)...")
     start_time = time.time()
@@ -141,9 +143,7 @@ def main():
         print(f"[ERROR] Locked XGBoost model not found at {XGB_MODEL_FILE}")
         return
 
-    # ---------------------------------------------------------
-    # 1. RECONSTRUCT SOURCE SCALERS FROM MIMIC-IV
-    # ---------------------------------------------------------
+    # --- Reconstruct Source Scalers From Mimic-iv ------------------------
     print("    -> Reconstructing original scalers from MIMIC-IV to prevent feature drift...")
     try:
         mimic_tensor = np.load(MIMIC_TENSOR_FILE)
@@ -156,10 +156,8 @@ def main():
 
     df_mimic = pd.DataFrame({"stay_id": mimic_stay_ids}).merge(df_mimic, on="stay_id", how="left")
 
-    static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    static_cols = ["age", "baseline_sofa"]
     df_mimic_static = df_mimic[static_cols].copy()
-    if "gender" in df_mimic_static.columns and df_mimic_static["gender"].dtype == 'O':
-        df_mimic_static["gender"] = (df_mimic_static["gender"] == "M").astype(int)
 
     X_mimic_static_raw = df_mimic_static.fillna(0).values
 
@@ -167,7 +165,7 @@ def main():
     scaler_static = StandardScaler()
     scaler_static.fit(X_mimic_static_raw[mimic_train_idx])
 
-    # Fit Temporal Scaler EXACTLY as in training script (on full dataset)
+    # Fit Temporal Scaler EXACTLY as in training script (on train_val only)
     mimic_mean = np.mean(mimic_tensor, axis=1)
     mimic_min = np.min(mimic_tensor, axis=1)
     mimic_max = np.max(mimic_tensor, axis=1)
@@ -175,11 +173,10 @@ def main():
     X_mimic_temporal_raw = np.concatenate([mimic_mean, mimic_min, mimic_max, mimic_std], axis=1)
 
     scaler_temporal = StandardScaler()
-    scaler_temporal.fit(X_mimic_temporal_raw)
+    # Fitted only on mimic_train_idx
+    scaler_temporal.fit(X_mimic_temporal_raw[mimic_train_idx])
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT AND SCALE TARGET DATA (eICU)
-    # ---------------------------------------------------------
+    # --- EXTRACT AND SCALE TARGET DATA (eICU) ----------------------------
     print("    -> Extracting and scaling eICU external validation dataset...")
     try:
         eicu_tensor = np.load(EICU_TENSOR_FILE)
@@ -194,8 +191,6 @@ def main():
 
     # Static eICU
     df_eicu_static = df_eicu[static_cols].copy()
-    if "gender" in df_eicu_static.columns and df_eicu_static["gender"].dtype == 'O':
-        df_eicu_static["gender"] = (df_eicu_static["gender"] == "M").astype(int)
 
     X_eicu_static_raw = df_eicu_static.fillna(0).values
     X_eicu_static_scaled = scaler_static.transform(X_eicu_static_raw)
@@ -215,9 +210,7 @@ def main():
     print(f"       - eICU Mortality Rate: {y_test.mean() * 100:.2f}%")
     print(f"       - Final Feature Vector Shape: {X_test.shape}")
 
-    # ---------------------------------------------------------
-    # 3. INFERENCE & EVALUATION
-    # ---------------------------------------------------------
+    # --- Inference & Evaluation ------------------------------------------
     print("    -> Loading locked MIMIC-IV XGBoost model (Inference Mode)...")
     champion_xgb = joblib.load(XGB_MODEL_FILE)
 
@@ -247,9 +240,7 @@ def main():
     print(f"    Brier : {metrics['Brier']:.4f}  [95% CI: {metrics['Brier_95CI'][0]:.4f} - {metrics['Brier_95CI'][1]:.4f}]")
     print("="*60)
 
-    # ---------------------------------------------------------
-    # 4. PUBLICATION PLOTS
-    # ---------------------------------------------------------
+    # --- Publication Plots -----------------------------------------------
     print("\n    -> Generating Publication-Quality ROC and PR Curves...")
     fpr, tpr, _ = roc_curve(y_test, preds)
     precision, recall, _ = precision_recall_curve(y_test, preds)

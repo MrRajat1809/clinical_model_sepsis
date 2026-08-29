@@ -1,11 +1,22 @@
 """
-09a_mimic_pruned_internal_test.py
+Train the reduced-feature model and compare it against the full one.
 
-Phase 8: Pruned Model Validation & Export
-Trains a lightweight XGBoost model using only the 72 highly stable features 
-identified by the RFECV stability analysis. Compares its AUROC directly against 
-the original 124-feature Champion model on the hold-out test set.
-Saves the final pruned model for downstream external validation and deployment.
+Tests whether the stable subset from the RFECV analysis is sufficient. Both
+models are scored on the same held-out patients, so the comparison answers
+whether the discarded features were carrying anything.
+
+The reduced model uses the same fixed cost-sensitive configuration as the
+feature-elimination estimator, not the tuned primary hyperparameters, since
+those were selected for the full space.
+
+The subset size is read from mimic_stable_optimal_features.json at run time and
+printed; it is not fixed in this file.
+
+Reads:
+    outputs/features/mimic_stable_optimal_features.json
+    outputs/models/mimic_champion_xgboost.joblib, the shared split indices
+Writes:
+    outputs/models/mimic_pruned_champion_xgboost.joblib
 """
 
 import time
@@ -22,12 +33,9 @@ import joblib
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Inputs mapped to flattened structure
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_FEATS = BASE_DIR / "outputs" / "features"
@@ -36,7 +44,6 @@ CHAMPION_MODEL_FILE = OUT_MODELS / "mimic_champion_xgboost.joblib"
 FEAT_NAMES_FILE = OUT_FEATS / "mimic_champion_features.json"
 STABLE_FEATS_FILE = OUT_FEATS / "mimic_stable_optimal_features.json"
 
-# Outputs
 OUT_MODELS.mkdir(parents=True, exist_ok=True)
 PRUNED_MODEL_FILE = OUT_MODELS / "mimic_pruned_champion_xgboost.joblib"
 
@@ -46,9 +53,7 @@ def main():
     print("[*] Initiating Phase 10: Pruned Model Validation & Export...")
     start_time = time.time()
 
-    # ---------------------------------------------------------
-    # 1. LOAD DATA & FEATURES
-    # ---------------------------------------------------------
+    # --- Load Data & Features --------------------------------------------
     print("    -> Reconstructing the MIMIC-IV feature space...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -69,13 +74,9 @@ def main():
     with open(STABLE_FEATS_FILE, "r") as f:
         stable_features = json.load(f)
 
-    # ---------------------------------------------------------
-    # 2. FLATTEN & STANDARDIZE THE 124-FEATURE SET
-    # ---------------------------------------------------------
-    static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    # --- Flatten & Standardize the 122-feature Set -----------------------
+    static_cols = ["age", "baseline_sofa"]
     df_static = df_cohort[[c for c in static_cols if c in df_cohort.columns]].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"].astype(str).str.upper() == "M").astype(int)
     X_static = df_static.fillna(0).values
 
     X_mean = np.mean(X_imputed, axis=1)
@@ -90,18 +91,14 @@ def main():
     X_train_full = scaler.transform(X_fused[idx_train])
     X_test_full = scaler.transform(X_fused[idx_test])
 
-    # ---------------------------------------------------------
-    # 3. FILTER DOWN TO THE PRUNED FEATURES
-    # ---------------------------------------------------------
+    # --- Filter Down to the Pruned Features ------------------------------
     print(f"    -> Filtering dataset down to {len(stable_features)} stable features...")
     stable_indices = [np.where(all_feature_names == f)[0][0] for f in stable_features]
     
     X_train_pruned = X_train_full[:, stable_indices]
     X_test_pruned = X_test_full[:, stable_indices]
 
-    # ---------------------------------------------------------
-    # 4. TRAIN & SAVE THE PRUNED MODEL
-    # ---------------------------------------------------------
+    # --- Train & Save the Pruned Model -----------------------------------
     n_survivors = np.sum(y_train == 0)
     n_nonsurvivors = np.sum(y_train == 1)
     scale_pos_weight = n_survivors / n_nonsurvivors
@@ -125,9 +122,7 @@ def main():
     pruned_auroc = roc_auc_score(y_test, pruned_preds)
     pruned_auprc = average_precision_score(y_test, pruned_preds)
 
-    # ---------------------------------------------------------
-    # 5. EVALUATE THE ORIGINAL CHAMPION MODEL
-    # ---------------------------------------------------------
+    # --- Evaluate the Original Champion Model ----------------------------
     print("    -> Evaluating the original Champion model...")
     champion_xgb = joblib.load(CHAMPION_MODEL_FILE)
     
@@ -135,9 +130,7 @@ def main():
     champion_auroc = roc_auc_score(y_test, champion_preds)
     champion_auprc = average_precision_score(y_test, champion_preds)
 
-    # ---------------------------------------------------------
-    # 6. RESULTS
-    # ---------------------------------------------------------
+    # --- Results ---------------------------------------------------------
     print("\n======================================================================")
     print(" FINAL HOLD-OUT TEST SET PERFORMANCE (MIMIC-IV)")
     print("======================================================================")

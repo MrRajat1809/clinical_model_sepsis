@@ -1,12 +1,19 @@
 """
-03b_static_mlp.py
+Multilayer perceptron over the four static variables only.
 
-Phase 2: Test Whether Deep Learning Actually Helps
-Trains a Unimodal Static Deep Learning Model (MLP only).
-- Input: Static clinical context only (Age, SOFA, CCI, Gender).
-- Purpose: Completes the deep learning ablation by isolating the predictive 
-  power of the static variables within a neural network framework.
-- Output: Exports trained model, predictions, and learning curves.
+The lower bound of the deep-learning arm: age, baseline SOFA, Charlson index and
+sex, with no temporal information at all. Whatever this reaches is what is
+available from admission characteristics alone, and the gap to the temporal and
+multimodal models is the value of the trajectory.
+
+Architecture: 4 -> 32 -> 16 -> 1 with batch normalisation and dropout 0.2.
+Training configuration matches the other neural models so the comparison is not
+confounded by optimisation differences.
+
+Reads:
+    mimic_final_sepsis3_cohort.parquet, the shared split indices
+Writes:
+    model weights, predictions, training history and curve
 """
 
 import time
@@ -35,14 +42,11 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -55,7 +59,7 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FIGURES]:
 EPOCHS = 50
 BATCH_SIZE = 128
 LEARNING_RATE = 5e-4
-STATIC_DIM = 4
+STATIC_DIM = 2
 PATIENCE = 7
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RANDOM_STATE = 42
@@ -71,9 +75,7 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-# ==========================================
-# DATASET & ARCHITECTURE
-# ==========================================
+# --- Dataset & Architecture ----------------------------------------------
 class StaticSepsisDataset(Dataset):
     def __init__(self, X_stat, y):
         self.X_stat = torch.tensor(X_stat, dtype=torch.float32)
@@ -86,7 +88,7 @@ class StaticSepsisDataset(Dataset):
         return self.X_stat[idx], self.y[idx]
 
 class StaticMLPNet(nn.Module):
-    def __init__(self, static_dim=4):
+    def __init__(self, static_dim=2):
         super(StaticMLPNet, self).__init__()
         self.mlp = nn.Sequential(
             nn.Linear(static_dim, 32),
@@ -104,9 +106,7 @@ class StaticMLPNet(nn.Module):
         logits = self.mlp(x_stat)
         return logits.squeeze(-1)
 
-# ==========================================
-# EVALUATION HELPER
-# ==========================================
+# --- Evaluation Helper ---------------------------------------------------
 def evaluate_model(y_true, y_prob, threshold=0.5):
     y_pred = (y_prob >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -123,17 +123,13 @@ def evaluate_model(y_true, y_prob, threshold=0.5):
         "Balanced_Accuracy": float(balanced_accuracy_score(y_true, y_pred))
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 2: Unimodal Static MLP...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD SHARED DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Shared Data & Splits ---------------------------------------
     print("    -> Loading cohort metadata and exact split indices...")
     df_cohort = pl.read_parquet(PROCESSED_DIR / "mimic_final_sepsis3_cohort.parquet").to_pandas()
     y = df_cohort["hospital_expire_flag"].values
@@ -142,15 +138,11 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT & SCALE STATIC FEATURES
-    # ---------------------------------------------------------
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    # --- Extract & Scale Static Features ---------------------------------
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     X_static_raw = df_static.fillna(0).values
     
@@ -159,9 +151,7 @@ def main():
     scaler_static.fit(X_static_raw[idx_train_val])
     X_static = scaler_static.transform(X_static_raw)
 
-    # ---------------------------------------------------------
-    # 3. BUILD DATALOADERS
-    # ---------------------------------------------------------
+    # --- Build Dataloaders -----------------------------------------------
     y_train_val = y[idx_train_val]
     idx_train, idx_val = train_test_split(
         idx_train_val, test_size=0.15, random_state=RANDOM_STATE, stratify=y_train_val 
@@ -175,9 +165,7 @@ def main():
     val_loader = DataLoader(StaticSepsisDataset(X_s_val, y_val), batch_size=BATCH_SIZE)
     test_loader = DataLoader(StaticSepsisDataset(X_s_test, y_test), batch_size=BATCH_SIZE)
 
-    # ---------------------------------------------------------
-    # 4. INITIALIZE ARCHITECTURE & AMP
-    # ---------------------------------------------------------
+    # --- Initialize Architecture & Amp -----------------------------------
     print(f"    -> Initializing StaticMLPNet & Mixed Precision on {DEVICE}...")
     model = StaticMLPNet(static_dim=STATIC_DIM).to(DEVICE)
     
@@ -188,9 +176,7 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=False)
     scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
-    # ---------------------------------------------------------
-    # 5. TRAINING LOOP WITH EARLY STOPPING
-    # ---------------------------------------------------------
+    # --- Training Loop with Early Stopping -------------------------------
     print("    -> Commencing Training Loop...")
     best_val_auprc = 0.0
     epochs_no_improve = 0
@@ -250,9 +236,7 @@ def main():
                 print(f"    [!] Early stopping triggered at epoch {epoch+1}")
                 break
 
-    # ---------------------------------------------------------
-    # 6. POST-TRAINING: LOGS & CURVES
-    # ---------------------------------------------------------
+    # --- Post-training: Logs & Curves ------------------------------------
     df_hist = pd.DataFrame(history)
     df_hist.to_csv(OUT_METRICS / "mimic_static_mlp_history.csv", index=False)
     
@@ -267,9 +251,7 @@ def main():
     plt.savefig(OUT_FIGURES / "mimic_static_mlp_curve.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # ---------------------------------------------------------
-    # 7. INFERENCE: TEST EVALUATION
-    # ---------------------------------------------------------
+    # --- Inference: Test Evaluation --------------------------------------
     print("\n    -> Evaluating Test Set...")
     model.load_state_dict(torch.load(model_save_path))
     model.eval()
@@ -297,9 +279,7 @@ def main():
     with open(OUT_MODELS / "mimic_static_mlp_config.json", "w") as f:
         json.dump(config, f, indent=4)
 
-    # ---------------------------------------------------------
-    # 8. REPORT
-    # ---------------------------------------------------------
+    # --- Report ----------------------------------------------------------
     metrics = evaluate_model(y_test, np.array(test_preds))
     
     with open(OUT_METRICS / "mimic_static_mlp_metrics.json", "w") as f:

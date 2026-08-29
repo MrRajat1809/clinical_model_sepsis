@@ -1,40 +1,43 @@
 """
-04a_mimic_temporal_slice.py
+Extract the raw clinical time series around the suspected infection time.
 
-Extracts the critical temporal window (-48 to +48 hours) around the Suspected Infection Time (SIT).
-Extracts vitals, labs, vasopressor administration, urine output, and mechanical ventilation status.
+Pulls every observation from -48 h to +48 h relative to SIT across five source
+tables and emits them in one long-format table keyed by stay, timestamp and
+item. Two normalisations are applied at extraction because they are cheaper here
+than downstream:
 
-Features included:
-- Raw vasopressors (Norepi, Epi, Dopa, Dobutamine, Vasopressin, Phenylephrine) are 
-  passed through natively to support strict SOFA scoring.
-- Enforces strict Pharmacological standardization inline (mcg/kg/min, or units/min for Vaso)
-  using an 80kg fallback to prevent massive NEQ inflation from 'units/hour' or 'mcg/min'.
-- Urine Output extraction from the `outputevents` table.
-- Augmented Mechanical Ventilation extraction that includes both `procedureevents` 
-  and `chartevents` (e.g., PEEP charting) to prevent false negatives.
+    temperature charted in Fahrenheit is converted to Celsius
+    vasopressor rates are standardised to mcg/kg/min, or units/min for
+    vasopressin, using recorded infusion weight with an 80 kg fallback
+
+Every dose unit in use is mapped explicitly and anything unrecognised becomes
+NULL, so an unconverted rate can never reach the tensor. Ventilation is taken
+from both procedure records and charted ventilator parameters, since either
+alone misses a substantial share of ventilated stays.
+
+Reads:
+    mimic_sepsis_phenotype_cohort.parquet
+    data/raw/mimiciv/3.1/{icu/chartevents, hosp/labevents, icu/inputevents,
+                          icu/outputevents, icu/procedureevents}
+Writes:
+    mimic_sepsis_temporal_data.parquet
 """
 
 import time
 from pathlib import Path
 import duckdb
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 MIMIC_DIR = BASE_DIR / "data" / "raw" / "mimiciv" / "3.1"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing MIMIC-IV temporal extraction pipeline...")
     start_time = time.time()
     
-    # Read explicitly named file from Script 03
     cohort_file = PROCESSED_DIR / "mimic_sepsis_phenotype_cohort.parquet"
-    # Write explicitly named output file
     out_file = PROCESSED_DIR / "mimic_sepsis_temporal_data.parquet"
     
     if not cohort_file.exists():
@@ -117,21 +120,27 @@ def main():
             'vaso' AS data_type,
             i.starttime AS event_time,
             i.itemid,
-            -- [FIX]: Rigorous Pharmacological standardization 
+            -- Standardise every dose unit in use; anything unrecognised
+            -- becomes NULL rather than passing through unconverted.
             CASE 
-                -- Vasopressin (222315) MUST be units/min
-                WHEN i.itemid = 222315 AND lower(i.rateuom) = 'units/hour' THEN (i.rate / 60.0)
-                WHEN i.itemid = 222315 AND lower(i.rateuom) = 'units/min' THEN i.rate
+                -- Convert hourly rates to minute rates
+                WHEN lower(i.rateuom) = 'units/hour' THEN (i.rate / 60.0)
                 
-                -- Catecholamines MUST be mcg/kg/min (Using 80kg fallback for missing weights)
-                WHEN lower(i.rateuom) = 'mcg/min' THEN 
-                    CASE WHEN i.patientweight > 0 THEN (i.rate / i.patientweight) ELSE (i.rate / 80.0) END
+                -- Convert mg to mcg
+                WHEN lower(i.rateuom) = 'mg/kg/min' THEN (i.rate * 1000.0)
                 WHEN lower(i.rateuom) = 'mg/min' THEN 
                     CASE WHEN i.patientweight > 0 THEN ((i.rate * 1000.0) / i.patientweight) ELSE ((i.rate * 1000.0) / 80.0) END
-                WHEN lower(i.rateuom) = 'mcg/kg/min' THEN i.rate
                 
-                -- Fallback for extreme anomalies
-                ELSE i.rate
+                -- Normalize non-weight based mcg rates using 80kg fallback
+                WHEN lower(i.rateuom) = 'mcg/min' THEN 
+                    CASE WHEN i.patientweight > 0 THEN (i.rate / i.patientweight) ELSE (i.rate / 80.0) END
+                
+                -- Passthrough standard units
+                WHEN lower(i.rateuom) = 'mcg/kg/min' THEN i.rate
+                WHEN lower(i.rateuom) = 'units/min' THEN i.rate
+                
+                -- Drop any unrecognized units to prevent silent garbage
+                ELSE NULL
             END AS valuenum
         FROM read_csv_auto('{MIMIC_DIR}/icu/inputevents.csv.gz') i
         INNER JOIN cohort p ON i.stay_id = p.stay_id
@@ -194,6 +203,9 @@ def main():
     SELECT * FROM sliced_labs
     UNION ALL
     SELECT * FROM sliced_vasos
+    -- Unrecognised dose units became NULL above; drop those rows so they
+    -- never reach the tensor.
+    WHERE valuenum IS NOT NULL
     UNION ALL
     SELECT * FROM sliced_uo
     UNION ALL
@@ -207,10 +219,8 @@ def main():
     print("    - Extracting urine output (outputevents)")
     print("    - Extracting mechanical ventilation statuses (procedureevents + chartevents)")
     
-    # Execute and write directly to Parquet
     con.execute(f"COPY ({query}) TO '{out_file}' (FORMAT PARQUET)")
     
-    # Verify the output
     count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
     elapsed = time.time() - start_time
     

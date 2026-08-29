@@ -1,14 +1,19 @@
 """
-08b_eicu_atlas_shape_characterization.py
+Embed and annotate the eICU shape manifold.
 
-Takes the precomputed SHAPE-BASED DTW pairwise distance matrix (MeanVariance scaled) 
-from the eICU cohort and projects it into a 2D manifold using PHATE.
+Runs PHATE on the precomputed shape DTW distance matrix and overlays the same
+eight clinical variables used for MIMIC-IV, so the two cohorts' shape manifolds
+can be compared directly.
 
-Features included:
-- Generates an 8-panel publication-quality figure coloring the eICU manifold by Mortality, 
-  SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to compare side-by-side 
-  against the primary MIMIC-IV development atlas.
-- Input filename explicitly updated to load the `_shape_` distance matrix.
+Ventilation is read from the raw rather than the imputed tensor, since a
+continuous reconstruction of a binary indicator is not interpretable.
+
+Reads:
+    outputs/features/eicu_dtw_shape_pairwise_distance_matrix.npy
+    eicu_final_sepsis3_cohort.parquet, imputed and raw tensors
+Writes:
+    outputs/features/eicu_phate_shape_coordinates.parquet
+    outputs/figures/eicu_Shape_Trajectory_Manifold.png
 """
 
 import time
@@ -24,13 +29,10 @@ import phate
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
@@ -49,7 +51,6 @@ def run_shape_atlas_characterization():
     raw_tensor_file = PROCESSED_DIR / "eicu_sepsis_tensor_raw.npy"  
     features_file = PROCESSED_DIR / "eicu_sepsis_tensor_features.npy"
     
-    # Outputs
     atlas_coords_file = OUT_FEATS / "eicu_phate_shape_coordinates.parquet"
     plot_file = OUT_FIGURES / "eicu_Shape_Trajectory_Manifold.png"
     

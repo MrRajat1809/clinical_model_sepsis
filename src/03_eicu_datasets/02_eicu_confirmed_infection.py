@@ -1,27 +1,36 @@
 """
-02_eicu_confirmed_infection.py
+Identify suspected infection from recorded diagnoses.
 
-Extracts patients with a confirmed suspected infection during the ICU presentation window.
-- Bypasses the sparse microLab/medication temporal logic due to eICU EHR mapping failures.
-- Uses the active `diagnosis` and `admissionDx` tables to find clinical infection markers 
-  (sepsis, pneumonia, infection, etc.) entered within +/- 24 hours of ICU admission.
-- Relies on the rigorous elective-surgery exclusion from Step 01 to prevent surgical mimics.
+eICU cannot support the culture-plus-antibiotic coupling used in MIMIC-IV: its
+microbiology and medication tables are too sparsely populated for the temporal
+rules to be applied reliably. Infection is therefore taken from active and
+admission diagnoses recorded within 24 hours either side of ICU admission, and
+the suspected infection time is the earliest such entry.
+
+Qualifying terms cover sepsis and septic presentations, pneumonia, generic
+infection, peritonitis, meningitis, cholangitis, endocarditis and bacteraemia.
+
+This asymmetry with MIMIC-IV is the largest structural difference between the
+two cohorts and belongs in the limitations. The elective-surgery exclusion
+already applied in 01 does the work of keeping prophylactic surgical cases out.
+
+Reads:
+    eicu_base_cohort.parquet
+    data/raw/eicu-crd/2.0/{diagnosis, admissionDx}
+Writes:
+    eicu_infection_cohort.parquet, carrying sit_offset in minutes
 """
 
 import time
 from pathlib import Path
 import duckdb
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Executing eICU active diagnosis infection filter pipeline...")
     start_time = time.time()
@@ -36,9 +45,7 @@ def main():
     print("\n    -> Initializing in-memory DuckDB...")
     con = duckdb.connect(database=':memory:')
     
-    # ---------------------------------------------------------
-    # 1. EXTRACT ACTIVE INFECTION DIAGNOSES
-    # ---------------------------------------------------------
+    # --- Extract Active Infection Diagnoses ------------------------------
     print("    -> Scanning `diagnosis` and `admissionDx` tables for active infections...")
     
     query = f"""
@@ -100,10 +107,8 @@ def main():
     
     print("    -> Joining identified infections with the base cohort...")
     
-    # Execute and write directly to Parquet
     con.execute(f"COPY ({query}) TO '{out_file}' (FORMAT PARQUET)")
     
-    # Verify the output
     count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
     elapsed = time.time() - start_time
     

@@ -1,11 +1,30 @@
 """
-07b_mimic_saits_imputation.py
+Train SAITS on MIMIC-IV and reconstruct the missing tensor entries.
 
-Loads the raw 3D tensor containing NaNs. Applies log1p transformations to skewed features, 
-scales the data, and trains a PyPOTS SAITS model.
-Uses an 80/20 stratified validation split for early stopping.
-Imputes missing variables, reverses transformations, clips to physiological bounds, 
-and generates comprehensive publication-grade QC reports and distribution plots.
+This is where the imputation model is fitted and locked. eICU never trains its
+own: it loads the scaler and weights written here, so both cohorts are
+reconstructed by the same function and any difference between them reflects the
+data rather than two different models.
+
+Preparation:
+    log1p on the six right-skewed variables (lactate, bilirubin, creatinine,
+    BUN, urine output, NEQ), then standardisation
+    80/20 mortality-stratified split for training and early stopping
+
+Architecture: two layers, model dimension 256, feed-forward 128, four attention
+heads, key and value dimension 64, dropout 0.1, up to 100 epochs with early
+stopping after 10 without improvement, best checkpoint retained.
+
+After imputation the transformations are reversed and values are clipped to
+physiological ranges, so no reconstructed value can fall outside what the
+variable can take.
+
+Reads:
+    mimic_sepsis_tensor_raw.npy and its feature and label arrays
+Writes:
+    mimic_sepsis_imputed_tensor.npy
+    outputs/models/{mimic_saits_scaler.joblib, mimic_saits_model_weights.pypots}
+    a per-feature QC report and pre/post distribution plots
 """
 
 import time
@@ -24,16 +43,13 @@ from pypots.imputation import SAITS
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 np.random.seed(42)
 torch.manual_seed(42)
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Output target directories based on strict artifact taxonomy
 OUT_MODELS_DIR = BASE_DIR / "outputs" / "models"
 OUT_METRICS_DIR = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES_DIR = BASE_DIR / "outputs" / "figures"

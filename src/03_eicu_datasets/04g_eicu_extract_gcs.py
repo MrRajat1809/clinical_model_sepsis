@@ -1,16 +1,22 @@
 """
-04g_eicu_extract_gcs.py
+Extract Glasgow Coma Scale components from nurse charting.
 
-Extracts Glasgow Coma Scale (GCS) components from the `nurseCharting` table.
-Utilizes direct string-to-float casting since the eICU vocabulary profiler 
-revealed the scores are stored as clean numerical strings (e.g., '6', '5', '4').
+GCS does not appear in the eICU tables the main temporal slice reads, so it is
+recovered separately from nurseCharting, which is the largest table in the
+database. The lazy scan runs on the Polars streaming engine to keep memory
+bounded.
 
-Features included:
-- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
-  circular dependency.
-- Anchors the extraction window to `sit_offset` and widens it to +/- 48 hours.
-- Enabled Polars streaming engine to prevent OOM crashes during the processing 
-  of the massive nurseCharting table.
+Values are stored as clean numeric strings, so they are cast directly after
+stripping non-numeric characters, then constrained to the valid range of each
+component: eye 1-4, verbal 1-5, motor 1-6. Out-of-range values are dropped
+rather than repaired, since a GCS component outside its range is a charting
+error with no recoverable intent.
+
+Reads:
+    eicu_sepsis_phenotype_cohort.parquet
+    data/raw/eicu-crd/2.0/nurseCharting
+Writes:
+    eicu_gcs_timeline.parquet
 """
 
 import time
@@ -20,9 +26,7 @@ import itertools
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 RAW_EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
@@ -57,7 +61,7 @@ def extract_gcs():
     start_time = time.time()
     
     charting_file = RAW_EICU_DIR / "nurseCharting.csv.gz"
-    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    # Point to the Phenotype cohort to allow execution before script 05
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_file = PROCESSED_DIR / "eicu_gcs_timeline.parquet"
     
@@ -67,7 +71,7 @@ def extract_gcs():
 
     print("    -> Loading Sepsis Phenotype cohort...")
     try:
-        # [FIX]: Load sit_offset instead of sepsis_onset_offset
+        # Load sit_offset instead of sepsis_onset_offset
         df_cohort = pl.read_parquet(cohort_file).select(["stay_id", "sit_offset"])
     except Exception as e:
         print(f"[ERROR] Failed to load cohort file at {cohort_file}. Error: {e}")
@@ -93,7 +97,7 @@ def extract_gcs():
     
     df_joined = df_gcs.join(df_cohort.lazy(), on="stay_id", how="inner")
     
-    # [FIX]: Calculate temporal window based on SIT and expand to +/- 48 hours
+    # Calculate temporal window based on SIT and expand to +/- 48 hours
     df_window = df_joined.with_columns(
         ((pl.col("event_time") - pl.col("sit_offset")) / 60.0).alias("hours_from_sit"),
         pl.col("chart_value").cast(pl.Float64, strict=False).alias("valuenum")

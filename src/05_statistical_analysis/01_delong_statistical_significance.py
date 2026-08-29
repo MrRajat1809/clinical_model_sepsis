@@ -1,10 +1,25 @@
 """
-01_delong_statistical_significance.py
+DeLong test for the difference between two correlated ROC curves.
 
-Phase 5: Statistical Analysis
-Calculates DeLong's asymptotic variance test for two correlated ROC curves.
-This proves whether the performance gap between the Champion XGBoost 
-and the Baseline Logistic Regression is statistically significant.
+The primary model and the logistic regression are scored on the same patients,
+so their AUROC estimates are correlated and an unpaired comparison would
+overstate the uncertainty. DeLong's method estimates the covariance from the
+structural components of each AUROC and folds it into the variance of the
+difference.
+
+Implements the midrank-based fast algorithm directly rather than taking a
+dependency, and cross-checks both AUROC values against scikit-learn before the
+comparison, so an error in the implementation cannot pass unnoticed.
+
+Patient ordering and labels are asserted identical across the two prediction
+files first; the test is meaningless if the rows are not the same patients.
+
+Applies to discrimination only. Calibration differences need a different test.
+
+Reads:
+    outputs/predictions/mimic_{champion, LR_Combined}_predictions.csv
+Writes:
+    outputs/analysis/delong_significance_results.json
 """
 
 import time
@@ -18,23 +33,17 @@ from sklearn.metrics import roc_auc_score
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Inputs
 CHAMPION_PREDS = BASE_DIR / "outputs" / "predictions" / "mimic_champion_predictions.csv"
 BASELINE_PREDS = BASE_DIR / "outputs" / "predictions" / "mimic_LR_Combined_predictions.csv"
 
-# Outputs
 OUT_ANALYSIS = BASE_DIR / "outputs" / "analysis"
 OUT_ANALYSIS.mkdir(parents=True, exist_ok=True)
 DELONG_REPORT = OUT_ANALYSIS / "delong_significance_results.json"
 
-# ==========================================
-# FAST DELONG IMPLEMENTATION 
-# ==========================================
+# --- Fast Delong Implementation ------------------------------------------
 def compute_midrank(x):
     """Computes global midranks for the DeLong algorithm."""
     J = np.argsort(x)

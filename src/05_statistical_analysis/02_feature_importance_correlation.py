@@ -1,10 +1,25 @@
 """
-02_feature_importance_correlation.py
+Do the features the model relies on match the features selection keeps.
 
-Calculates Spearman's Rank Correlation between the 100-iteration RFECV 
-selection stability and the 50-iteration Consensus SHAP values.
-This validates that the features most consistently selected by the algorithm 
-are the exact same features driving its clinical predictions across resamples.
+Two independent stability analyses have already run: RFECV retention frequency
+over 100 repetitions, and consensus SHAP attribution over 50 seeds. They ask
+different questions, one about whether a feature survives elimination and the
+other about how much it moves predictions, and they can disagree.
+
+Spearman rank correlation between the two orderings quantifies the agreement.
+High correlation means selection stability and predictive contribution identify
+the same variables, which is the reassuring case. Low correlation means the
+model leans on features that elimination readily discards, usually a sign of
+correlated predictors substituting for one another.
+
+Features are matched by name, and the value columns are located positionally so
+the script survives a rename in either source file.
+
+Reads:
+    outputs/metrics/mimic_rfecv_100_iteration_stability.csv
+    outputs/features/mimic_consensus_feature_importance.csv
+Writes:
+    outputs/analysis/consensus_feature_correlation.json and a merged rank table
 """
 
 import time
@@ -15,9 +30,7 @@ from scipy.stats import spearmanr
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Inputs (From Phase 2 / Phase 4)
@@ -80,6 +93,12 @@ def main():
     else:
         print("    [WARNING] Weak correlation. Model selection stability diverges from explanation stability.")
     print("="*60)
+
+    import json as _json
+    _analysis = OUT_ANALYSIS
+    with open(_analysis / "consensus_feature_correlation.json", "w") as _f:
+        _json.dump({"spearman_rho": float(rho), "p_value": float(p_val),
+                    "n_features_matched": int(len(df_compare))}, _f, indent=4)
 
     # Sort by consensus SHAP rank and save
     df_compare = df_compare.sort_values("Rank_SHAP_Consensus").reset_index(drop=True)

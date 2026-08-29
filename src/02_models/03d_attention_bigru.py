@@ -1,13 +1,20 @@
 """
-03d_attention_bigru.py
+Multimodal BiGRU with temporal attention instead of mean pooling.
 
-Phase 2: Test Whether Deep Learning Actually Helps
-Trains a Multimodal Deep Learning Model with Temporal Attention (Attention-BiGRU + Static MLP).
-- Input: 24h physiological time series tensor + Static clinical context.
-- Purpose: Benchmarks whether a dynamic attention mechanism over the temporal 
-  trajectory improves predictive performance over naive mean pooling.
-- Output: Exports trained model, predictions, learning curves, and attention-weighted 
-  temporal embeddings (to outputs/features/) for downstream hybrid stacking.
+Isolates one design choice. 03c collapses the 24 hidden states by averaging,
+which weights every hour equally; here an additive attention layer learns the
+weights instead, so the model can concentrate on the hours that matter. Every
+other component is unchanged from 03c, making the difference between them
+attributable to pooling alone.
+
+The attention weights are returned by the forward pass and can be inspected to
+see which hours the model actually used.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_final_sepsis3_cohort.parquet,
+    the shared split indices
+Writes:
+    model weights, predictions, attention-weighted embeddings, training history
 """
 
 import time
@@ -36,14 +43,11 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -58,7 +62,7 @@ EPOCHS = 50
 BATCH_SIZE = 128
 LEARNING_RATE = 5e-4
 HIDDEN_DIM = 64
-STATIC_DIM = 4
+STATIC_DIM = 2
 PATIENCE = 7
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RANDOM_STATE = 42
@@ -74,9 +78,7 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-# ==========================================
-# DATASET & ARCHITECTURE
-# ==========================================
+# --- Dataset & Architecture ----------------------------------------------
 class MultimodalSepsisDataset(Dataset):
     def __init__(self, X_temp, X_stat, y):
         self.X_temp = torch.tensor(X_temp, dtype=torch.float32)
@@ -108,7 +110,7 @@ class TemporalAttention(nn.Module):
         return context_vector, attn_weights
 
 class AttentionBiGRUFusionNet(nn.Module):
-    def __init__(self, temporal_dim=30, static_dim=4, hidden_dim=64):
+    def __init__(self, temporal_dim=30, static_dim=2, hidden_dim=64):
         super(AttentionBiGRUFusionNet, self).__init__()
         
         # 1. Temporal Branch (BiGRU)
@@ -152,9 +154,7 @@ class AttentionBiGRUFusionNet(nn.Module):
         
         return logits.squeeze(-1), x_t, attn_weights
 
-# ==========================================
-# EVALUATION HELPER
-# ==========================================
+# --- Evaluation Helper ---------------------------------------------------
 def evaluate_model(y_true, y_prob, threshold=0.5):
     y_pred = (y_prob >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
@@ -171,17 +171,13 @@ def evaluate_model(y_true, y_prob, threshold=0.5):
         "Balanced_Accuracy": float(balanced_accuracy_score(y_true, y_pred))
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 2: Multimodal Attention-BiGRU...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD SHARED DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Shared Data & Splits ---------------------------------------
     print("    -> Loading shared tensor, cohort metadata, and exact split indices...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -194,15 +190,11 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT & SCALE STATIC FEATURES
-    # ---------------------------------------------------------
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    # --- Extract & Scale Static Features ---------------------------------
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     X_static_raw = df_static.fillna(0).values
     
@@ -211,9 +203,7 @@ def main():
     scaler_static.fit(X_static_raw[idx_train_val])
     X_static = scaler_static.transform(X_static_raw)
 
-    # ---------------------------------------------------------
-    # 3. BUILD DATALOADERS
-    # ---------------------------------------------------------
+    # --- Build Dataloaders -----------------------------------------------
     y_train_val = y[idx_train_val]
     idx_train, idx_val = train_test_split(
         idx_train_val, test_size=0.15, random_state=RANDOM_STATE, stratify=y_train_val 
@@ -228,9 +218,7 @@ def main():
     test_loader = DataLoader(MultimodalSepsisDataset(X_t_test, X_s_test, y_test), batch_size=BATCH_SIZE)
     full_loader = DataLoader(MultimodalSepsisDataset(X_imputed, X_static, y), batch_size=BATCH_SIZE, shuffle=False)
 
-    # ---------------------------------------------------------
-    # 4. INITIALIZE ARCHITECTURE & AMP
-    # ---------------------------------------------------------
+    # --- Initialize Architecture & Amp -----------------------------------
     print(f"    -> Initializing AttentionBiGRUFusionNet & Mixed Precision on {DEVICE}...")
     model = AttentionBiGRUFusionNet(temporal_dim=X_imputed.shape[2], static_dim=STATIC_DIM, hidden_dim=HIDDEN_DIM).to(DEVICE)
     
@@ -241,9 +229,7 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
     scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
-    # ---------------------------------------------------------
-    # 5. TRAINING LOOP WITH EARLY STOPPING
-    # ---------------------------------------------------------
+    # --- Training Loop with Early Stopping -------------------------------
     print("    -> Commencing Training Loop...")
     best_val_auprc = 0.0
     epochs_no_improve = 0
@@ -303,9 +289,7 @@ def main():
                 print(f"    [!] Early stopping triggered at epoch {epoch+1}")
                 break
 
-    # ---------------------------------------------------------
-    # 6. POST-TRAINING: LOGS & CURVES
-    # ---------------------------------------------------------
+    # --- Post-training: Logs & Curves ------------------------------------
     df_hist = pd.DataFrame(history)
     df_hist.to_csv(OUT_METRICS / "mimic_attention_multimodal_bigru_history.csv", index=False)
     
@@ -320,9 +304,7 @@ def main():
     plt.savefig(OUT_FIGURES / "mimic_attention_multimodal_bigru_curve.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # ---------------------------------------------------------
-    # 7. INFERENCE: EMBEDDINGS & TEST EVALUATION
-    # ---------------------------------------------------------
+    # --- Inference: Embeddings & Test Evaluation -------------------------
     print("\n    -> Extracting Latent Embeddings & Evaluating Test Set...")
     model.load_state_dict(torch.load(model_save_path))
     model.eval()
@@ -361,9 +343,7 @@ def main():
     with open(OUT_MODELS / "mimic_attention_multimodal_bigru_config.json", "w") as f:
         json.dump(config, f, indent=4)
 
-    # ---------------------------------------------------------
-    # 8. REPORT
-    # ---------------------------------------------------------
+    # --- Report ----------------------------------------------------------
     metrics = evaluate_model(y_test, np.array(test_preds))
     
     with open(OUT_METRICS / "mimic_attention_multimodal_bigru_metrics.json", "w") as f:

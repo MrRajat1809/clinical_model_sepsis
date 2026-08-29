@@ -9,6 +9,10 @@ scikit-learn
 # Time-Series Analysis
 tslearn
 dtaidistance
+# [ADDED P4-12]: imported by the pipeline but previously unlisted
+pypots            # SAITS imputation (07b)
+optuna            # hyperparameter search (04a, 04b)
+POT               # optimal transport, imported as `ot` (atlas 01a, 06, 07)
 
 # Advanced Statistics & Survival Analysis
 statsmodels

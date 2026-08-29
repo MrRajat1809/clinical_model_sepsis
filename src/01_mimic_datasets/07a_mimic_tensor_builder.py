@@ -1,17 +1,32 @@
 """
-07a_mimic_tensor_builder.py
+Reshape the cleaned time series into the modelling tensor.
 
-Reshapes the cleaned temporal extraction into a dense 3D tensor [Patients, 24 Steps, Features].
-Creates parallel static feature vectors and mortality label arrays for downstream ML.
-Bins the first 24 hours post-onset into consistent 1-hour intervals.
+Bins the first 24 h after sepsis onset into 24 one-hour steps over 30 variables,
+producing a dense [patients, 24, 30] array. Hours with no observation stay NaN
+for SAITS to reconstruct.
 
-Features included:
-- Added Urine Output (UO), aggregated via sum() per 1-hour bin.
-- Replaced synthetic NEQ logic with the validated Brown et al. (2013) 
-  pharmacological conversion formula, computed dynamically from raw pressors.
-- Phenylephrine divisor explicitly updated to 2.2 to exactly match Brown et al. 
-  equivalencies (1 mcg NEQ = 2.2 mcg Phenylephrine).
-- Maintained tensor compactness by dropping raw pressors post-NEQ calculation.
+Aggregation within an hour follows the clinical meaning of each variable rather
+than one blanket rule:
+    mean    temperature, sodium, potassium, chloride
+    minimum MAP, SpO2, platelets, haemoglobin, albumin, pH, GCS components
+    sum     urine output
+    maximum everything else, including interventions
+
+Two variables are engineered before the raw inputs are dropped:
+    pf_ratio  PaO2 over FiO2, with FiO2 normalised to a fraction
+    neq       norepinephrine equivalent dose using the Brown et al. (2013)
+              factors, computed only for hours with a recorded vasopressor so
+              that "no drug" stays distinct from "zero dose"
+
+Feature order is fixed and shared with the eICU builder, since the locked model
+indexes by position.
+
+Reads:
+    mimic_final_sepsis3_cohort.parquet
+    mimic_sepsis_temporal_data_cleaned.parquet
+Writes:
+    mimic_sepsis_tensor_raw.npy and the parallel stay id, feature name, mask,
+    static, static feature name, label and aggregation policy arrays
 """
 
 import time
@@ -20,9 +35,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
@@ -52,9 +65,7 @@ def main():
         print(f"[ERROR] Cleaned temporal data not found at: {temporal_file}")
         return
 
-    # ---------------------------------------------------------
-    # 1. LOAD DATA & MAP CHANNELS
-    # ---------------------------------------------------------
+    # --- Load Data & Map Channels ----------------------------------------
     print("    -> Loading cohort demographics and mapping clinical features...")
     
     df_cohort = pl.read_parquet(cohort_file).select([
@@ -76,11 +87,11 @@ def main():
         220045: "hr", 220181: "map", 220052: "map", 220210: "rr", 
         223762: "temp_c", 223761: "temp_c", 220277: "spo2",
         # Labs
-        51301: "wbc", 51300: "wbc", 51265: "platelets", 227457: "platelets", 
-        51222: "hemoglobin", 50912: "creatinine", 220615: "creatinine", 
-        51006: "bun", 50885: "bilirubin", 225664: "bilirubin", 
-        50820: "ph", 50813: "lactate", 227442: "lactate", 
-        51274: "pt", 51275: "aptt", 50862: "albumin", 220862: "albumin", 
+        51301: "wbc", 51300: "wbc", 51265: "platelets",
+        51222: "hemoglobin", 50912: "creatinine",
+        51006: "bun", 50885: "bilirubin",
+        50820: "ph", 50813: "lactate",
+        51274: "pt", 51275: "aptt", 50862: "albumin",
         50971: "potassium", 50822: "potassium", 50983: "sodium", 
         50824: "sodium", 50931: "glucose", 50809: "glucose", 
         50902: "chloride", 50806: "chloride", 
@@ -103,9 +114,7 @@ def main():
         "feature": list(feature_map.values())
     }, schema={"itemid": pl.Int64, "feature": pl.Utf8})
 
-    # ---------------------------------------------------------
-    # 2. TEMPORAL BINNING (24 UNIFORM 1-HOUR BINS)
-    # ---------------------------------------------------------
+    # --- Temporal Binning (24 Uniform 1-hour Bins) -----------------------
     print("    -> Filtering temporal window and enforcing 24x 1-hour bins...")
     df_joined = df_vitals.join(df_cohort.lazy().select(["stay_id", "sepsis_onset_time"]), on="stay_id")
     df_joined = df_joined.join(mapping_df.lazy(), on="itemid")
@@ -120,9 +129,7 @@ def main():
         pl.col("hours_from_onset").floor().cast(pl.Int32).alias("time_step")
     ).collect()
 
-    # ---------------------------------------------------------
-    # 3. CLINICAL AGGREGATION
-    # ---------------------------------------------------------
+    # --- Clinical Aggregation --------------------------------------------
     print("    -> Applying physiological aggregation logic (Mean/Max/Min/Sum) per bin...")
     
     mean_vars = ["temp_c", "sodium", "potassium", "chloride"]
@@ -152,9 +159,7 @@ def main():
         values="val", index=["stay_id", "time_step"], on="feature", aggregate_function="first"
     ).to_pandas()
 
-    # ---------------------------------------------------------
-    # 4. FEATURE ENGINEERING (P/F RATIO & NEQ)
-    # ---------------------------------------------------------
+    # --- Feature Engineering (p/f Ratio & Neq) ---------------------------
     print("    -> Engineering PaO2/FiO2 ratio and validated NEQ conversion...")
     
     # PaO2/FiO2 Ratio
@@ -195,9 +200,7 @@ def main():
         if f not in df_wide.columns:
             df_wide[f] = np.nan
 
-    # ---------------------------------------------------------
-    # 5. TENSOR RESHAPING
-    # ---------------------------------------------------------
+    # --- Tensor Reshaping ------------------------------------------------
     print("    -> Reshaping data into dense 3D Tensor format...")
     stay_ids = sorted(df_cohort["stay_id"].to_list())
 
@@ -211,9 +214,7 @@ def main():
     print(f"        - 3D Temporal Shape : {X_3d.shape} [Patients, Steps, Features]")
     print(f"        - Missingness Rate  : {missingness_mask.mean() * 100:.2f}%")
 
-    # ---------------------------------------------------------
-    # 6. STATIC & LABEL EXTRACTION
-    # ---------------------------------------------------------
+    # --- Static & Label Extraction ---------------------------------------
     print("    -> Extracting parallel 2D Static Context and 1D Labels...")
     df_static = df_cohort.to_pandas().set_index("stay_id").reindex(stay_ids)
     
@@ -233,9 +234,7 @@ def main():
     print(f"        - 2D Static Shape   : {X_static.shape}")
     print(f"        - 1D Target Shape   : {y_labels.shape}")
 
-    # ---------------------------------------------------------
-    # 7. SERIALIZATION
-    # ---------------------------------------------------------
+    # --- Serialization ---------------------------------------------------
     np.save(out_tensor, X_3d)
     np.save(id_file, np.array(stay_ids))
     np.save(feature_file, np.array(FEATURE_ORDER))

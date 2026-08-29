@@ -1,17 +1,26 @@
 """
-05_multicenter_variance_test.py
+Does transport stabilise performance across individual hospitals.
 
-Executes the Multi-Center Variance Test to prove that Optimal Transport (OT) 
-stabilizes model performance across distinct healthcare systems.
+Aggregate external AUROC hides between-site variation: a model can look
+acceptable overall while failing at particular hospitals. eICU spans many
+centres, so hospital identifiers are joined back from the raw patient table and
+the ten largest contributing hospitals are scored separately.
 
-Methodology:
-1. Extracts the exact `hospitalid` for each eICU patient from the raw database.
-2. Isolates the Top 10 largest hospitals in the validation cohort.
-3. Evaluates the locked MIMIC-IV XGBoost model on these 10 hospitals using:
-   - Raw eICU features (Pre-OT)
-   - Harmonized eICU features (Post-OT)
-4. Calculates the standard deviation of AUROCs across hospitals to prove 
-   variance stabilization (algorithmic fairness).
+The locked model is applied twice per hospital, once to the unaligned
+representation and once to the transport-aligned one, and the dispersion of
+hospital-level AUROCs is compared before and after. A fall in standard deviation
+means alignment made performance more uniform across sites, which is a different
+claim from improving the mean and can be true even when the mean falls.
+
+Hospitals with only one outcome class are skipped, since AUROC is undefined
+there.
+
+Reads:
+    data/raw/eicu-crd/2.0/patient for hospital identifiers
+    the atlas features and metadata, the eICU tensors and cohort
+    outputs/models/mimic_champion_xgboost.joblib, the shared split indices
+Writes:
+    outputs/analysis/eicu_multicenter_variance_report.csv and a dumbbell plot
 """
 
 import time
@@ -29,12 +38,9 @@ from sklearn.metrics import roc_auc_score
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Inputs
 RAW_EICU_PATIENT = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0" / "patient.csv.gz"
 
 PROCESSED_DIR_ATLAS = BASE_DIR / "data" / "processed" / "atlas"
@@ -42,7 +48,7 @@ PROCESSED_DIR_MIMIC = BASE_DIR / "data" / "processed" / "mimiciv"
 PROCESSED_DIR_EICU = BASE_DIR / "data" / "processed" / "eicu"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 
-ATLAS_FEATURES_FILE = PROCESSED_DIR_ATLAS / "atlas_sepsis_features_124.npy"
+ATLAS_FEATURES_FILE = PROCESSED_DIR_ATLAS / "atlas_sepsis_features.npy"
 ATLAS_META_FILE = PROCESSED_DIR_ATLAS / "atlas_metadata.parquet"
 
 EICU_TENSOR_FILE = PROCESSED_DIR_EICU / "eicu_sepsis_imputed_tensor.npy"
@@ -68,9 +74,7 @@ def main():
     print("[*] Initiating Multi-Center Variance Statistical Proof...")
     start_time = time.time()
 
-    # ---------------------------------------------------------
-    # 1. LOAD HOSPITAL MAPPINGS
-    # ---------------------------------------------------------
+    # --- Load Hospital Mappings ------------------------------------------
     print("    -> Linking cohort to raw hospital IDs...")
     df_raw_patients = pd.read_csv(RAW_EICU_PATIENT, usecols=['patientunitstayid', 'hospitalid'])
     df_raw_patients = df_raw_patients.rename(columns={'patientunitstayid': 'stay_id'})
@@ -84,35 +88,32 @@ def main():
     y_eicu = df_eicu["hospital_expire_flag"].values
     hospital_ids = df_eicu["hospitalid"].values
 
-    # ---------------------------------------------------------
-    # 2. RECONSTRUCT SCALERS & LOAD MODEL
-    # ---------------------------------------------------------
+    # --- Reconstruct Scalers & Load Model --------------------------------
     print("    -> Reconstructing original scalers and loading model...")
     mimic_tensor = np.load(MIMIC_TENSOR_FILE)
     mimic_train_idx = np.load(MIMIC_TRAIN_IDX_FILE)
+    # Load tensor stay_ids to enforce alignment
+    mimic_stay_ids = np.load(MIMIC_STAY_ID_FILE)
     df_mimic = pl.read_parquet(MIMIC_COHORT_FILE).to_pandas()
-    
-    df_mimic_static = df_mimic[["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]].copy()
-    df_mimic_static["gender"] = (df_mimic_static["gender"] == "M").astype(int)
+    # Align df_mimic to match the exact tensor sorting
+    df_mimic = pd.DataFrame({"stay_id": mimic_stay_ids}).merge(df_mimic, on="stay_id", how="left")
+    df_mimic_static = df_mimic[["age", "baseline_sofa"]].copy()
     scaler_static = StandardScaler().fit(df_mimic_static.fillna(0).values[mimic_train_idx])
 
     mimic_temporal_raw = np.concatenate([
         np.mean(mimic_tensor, axis=1), np.min(mimic_tensor, axis=1),
         np.max(mimic_tensor, axis=1), np.std(mimic_tensor, axis=1)
     ], axis=1)
-    scaler_temporal = StandardScaler().fit(mimic_temporal_raw)
+    scaler_temporal = StandardScaler().fit(mimic_temporal_raw[mimic_train_idx])
     
     champion_xgb = joblib.load(XGB_MODEL_FILE)
 
-    # ---------------------------------------------------------
-    # 3. PREPARE RAW AND OT DATA
-    # ---------------------------------------------------------
+    # --- Prepare Raw and Ot Data -----------------------------------------
     print("    -> Formatting Pre-OT (Raw) and Post-OT (Atlas) Tensors...")
     
     # RAW (Pre-OT)
     eicu_tensor = np.load(EICU_TENSOR_FILE)
-    df_eicu_static = df_eicu[["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]].copy()
-    df_eicu_static["gender"] = (df_eicu_static["gender"] == "M").astype(int)
+    df_eicu_static = df_eicu[["age", "baseline_sofa"]].copy()
     X_raw_static_scaled = scaler_static.transform(df_eicu_static.fillna(0).values)
 
     eicu_temporal_raw = np.concatenate([
@@ -124,23 +125,33 @@ def main():
     preds_raw = champion_xgb.predict_proba(X_test_raw)[:, 1]
 
     # OT (Post-OT)
-    X_atlas_124 = np.load(ATLAS_FEATURES_FILE)
+    X_atlas = np.load(ATLAS_FEATURES_FILE)
     df_meta = pd.read_parquet(ATLAS_META_FILE)
     eicu_mask = df_meta["cohort_source"] == "eICU-CRD"
-    X_eicu_ot = X_atlas_124[eicu_mask]
+    X_eicu_ot = X_atlas[eicu_mask]
     
-    X_ot_temporal = X_eicu_ot[:, 0:120]
-    X_ot_static = X_eicu_ot[:, 120:124] # [Age, Gender, CCI, SOFA]
-    X_ot_static_reordered = X_ot_static[:, [0, 3, 2, 1]] # -> [Age, SOFA, CCI, Gender]
+    ATLAS_SRC = X_eicu_ot
+
+    # Atlas layout, written by 04_atlas_datasets/01a: temporal block first, then
+    # the static block in MODEL_STATICS order. Deriving the split from the names
+    # means a change to the static set fails loudly rather than silently
+    # selecting the wrong columns.
+    MODEL_STATICS = ["age", "baseline_sofa"]
+    N_TEMPORAL = ATLAS_SRC.shape[1] - len(MODEL_STATICS)
+    assert N_TEMPORAL == 120, f"expected 120 temporal columns, got {N_TEMPORAL}"
+
+    X_ot_temporal = X_eicu_ot[:, :N_TEMPORAL]
+    X_ot_static = X_eicu_ot[:, N_TEMPORAL:]
+
+    static_perm = [MODEL_STATICS.index(c) for c in ["age", "baseline_sofa"]]
+    X_ot_static_reordered = X_ot_static[:, static_perm]
     
     X_ot_static_scaled = scaler_static.transform(X_ot_static_reordered)
     X_ot_temporal_scaled = scaler_temporal.transform(X_ot_temporal)
     X_test_ot = np.concatenate([X_ot_static_scaled, X_ot_temporal_scaled], axis=1)
     preds_ot = champion_xgb.predict_proba(X_test_ot)[:, 1]
 
-    # ---------------------------------------------------------
-    # 4. MULTI-CENTER ANALYSIS (TOP 10 HOSPITALS)
-    # ---------------------------------------------------------
+    # --- Multi-center Analysis (top 10 Hospitals) ------------------------
     print("    -> Computing metrics per hospital...")
     
     # Identify Top 10 Hospitals with at least some mortality to allow AUROC calculation
@@ -183,9 +194,7 @@ def main():
     
     df_results.to_csv(REPORT_FILE, index=False)
 
-    # ---------------------------------------------------------
-    # 5. VISUALIZATION (DUMBBELL PLOT)
-    # ---------------------------------------------------------
+    # --- Visualization (dumbbell Plot) -----------------------------------
     print("    -> Generating Variance Stabilization Plot...")
     plt.figure(figsize=(10, 6))
     

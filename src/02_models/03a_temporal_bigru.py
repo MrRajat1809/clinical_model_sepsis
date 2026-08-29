@@ -1,13 +1,24 @@
 """
-03a_temporal_bigru.py
+Bidirectional GRU over the raw 24-hour trajectory.
 
-Phase 2: Test Whether Deep Learning Actually Helps
-Trains a Unimodal Deep Learning Model (BiGRU only).
-- Input: Pure 24h physiological time series tensor (No static clinical data).
-- Purpose: Benchmarks whether learned sequence trajectories alone can 
-  outperform classical XGBoost using engineered static+aggregated features.
-- Output: Exports trained model, predictions, learning curves, and full dataset 
-  latent embeddings (to outputs/features/) for downstream hybrid stacking.
+Tests whether a sequence model reading the tensor directly can beat engineered
+summary statistics. Deliberately unimodal: no static variables, so the only
+information available is the physiological trajectory itself.
+
+Architecture: two bidirectional GRU layers, hidden size 64, dropout 0.2, mean
+pooling across the 24 steps, then a small classifier head. Trained with AdamW at
+5e-4, weight decay 1e-4, batch size 128, class-weighted BCE, gradient clipping,
+learning-rate reduction on plateau and early stopping on validation AUPRC.
+
+The pooled 128-dimensional representation is exported for every patient. The
+modality ablation consumes it as the "deep temporal embedding" arm, which is the
+main reason this script runs before the ablation.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, the shared split indices
+Writes:
+    outputs/features/mimic_temporal_bigru_embeddings.npy
+    model weights, predictions, training history and curve
 """
 
 import time
@@ -35,14 +46,11 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -73,9 +81,7 @@ def set_seed(seed):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
-# ==========================================
-# DATASET & ARCHITECTURE
-# ==========================================
+# --- Dataset & Architecture ----------------------------------------------
 class TemporalSepsisDataset(Dataset):
     def __init__(self, X_temp, y):
         self.X_temp = torch.tensor(X_temp, dtype=torch.float32)
@@ -116,9 +122,7 @@ class TemporalBiGRUNet(nn.Module):
         logits = self.classifier(x_t)
         return logits.squeeze(-1), x_t
 
-# ==========================================
-# EVALUATION HELPER
-# ==========================================
+# --- Evaluation Helper ---------------------------------------------------
 def evaluate_model(y_true, y_prob, threshold=0.5):
     """Computes clinical metrics without bootstrapping (used for DL evaluation)."""
     y_pred = (y_prob >= threshold).astype(int)
@@ -136,17 +140,13 @@ def evaluate_model(y_true, y_prob, threshold=0.5):
         "Balanced_Accuracy": float(balanced_accuracy_score(y_true, y_pred))
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 2: Unimodal Temporal BiGRU...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD SHARED DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Shared Data & Splits ---------------------------------------
     print("    -> Loading shared tensor and exact split indices...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -174,9 +174,7 @@ def main():
     test_loader = DataLoader(TemporalSepsisDataset(X_test, y_test), batch_size=BATCH_SIZE)
     full_loader = DataLoader(TemporalSepsisDataset(X_imputed, y), batch_size=BATCH_SIZE, shuffle=False)
 
-    # ---------------------------------------------------------
-    # 2. INITIALIZE ARCHITECTURE & AMP
-    # ---------------------------------------------------------
+    # --- Initialize Architecture & Amp -----------------------------------
     print(f"    -> Initializing Model & Mixed Precision on {DEVICE}...")
     model = TemporalBiGRUNet(temporal_dim=X_imputed.shape[2], hidden_dim=HIDDEN_DIM).to(DEVICE)
     
@@ -187,9 +185,7 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=5, verbose=True)
     scaler = torch.cuda.amp.GradScaler() if torch.cuda.is_available() else None
 
-    # ---------------------------------------------------------
-    # 3. TRAINING LOOP WITH EARLY STOPPING
-    # ---------------------------------------------------------
+    # --- Training Loop with Early Stopping -------------------------------
     print("    -> Commencing Training Loop...")
     best_val_auprc = 0.0
     epochs_no_improve = 0
@@ -250,9 +246,7 @@ def main():
                 print(f"    [!] Early stopping triggered at epoch {epoch+1}")
                 break
 
-    # ---------------------------------------------------------
-    # 4. POST-TRAINING: LOGS & CURVES
-    # ---------------------------------------------------------
+    # --- Post-training: Logs & Curves ------------------------------------
     df_hist = pd.DataFrame(history)
     df_hist.to_csv(OUT_METRICS / "mimic_temporal_bigru_history.csv", index=False)
     
@@ -267,9 +261,7 @@ def main():
     plt.savefig(OUT_FIGURES / "mimic_temporal_bigru_curve.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # ---------------------------------------------------------
-    # 5. INFERENCE: EMBEDDINGS & TEST EVALUATION
-    # ---------------------------------------------------------
+    # --- Inference: Embeddings & Test Evaluation -------------------------
     print("\n    -> Extracting Latent Embeddings & Evaluating Test Set...")
     model.load_state_dict(torch.load(model_save_path))
     model.eval()
@@ -309,9 +301,7 @@ def main():
     with open(OUT_MODELS / "mimic_temporal_bigru_config.json", "w") as f:
         json.dump(config, f, indent=4)
 
-    # ---------------------------------------------------------
-    # 6. REPORT
-    # ---------------------------------------------------------
+    # --- Report ----------------------------------------------------------
     metrics = evaluate_model(y_test, np.array(test_preds))
     
     with open(OUT_METRICS / "mimic_temporal_bigru_metrics.json", "w") as f:

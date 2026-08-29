@@ -1,12 +1,28 @@
 """
-04a_champion_xgboost.py
+Tune, fit and lock the primary prognostic model.
 
-Phase 3: Train the Final Champion Model
-Trains and tunes the definitively selected architecture: XGBoost on Static + Aggregated features.
-- Excludes Deep Learning (BiGRU) embeddings based on ablation results.
-- Runs Optuna Bayesian Optimization for exact hyperparameter tuning.
-- Exports the locked champion model, raw predictions, and comprehensive bootstrap metrics 
-  for downstream Calibration and SHAP analysis.
+Produces the model every external validation, interpretation and transport
+analysis in the project loads. Once written it is never refitted.
+
+Search: 30 Optuna trials with a tree-structured Parzen sampler over stratified
+three-fold cross-validation inside the development partition, maximising mean
+fold AUROC, with early stopping within each fold. The search covers tree count,
+learning rate, depth, row and column subsampling, minimum child weight and
+minimum loss reduction. The selected configuration is refitted on the full
+development partition and evaluated exactly once on the held-out test set.
+
+Scalers are fitted on the development partition only, and the feature name list
+is exported so that every downstream reconstruction can be checked against the
+order the model was trained on.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_final_sepsis3_cohort.parquet,
+    the shared split indices
+Writes:
+    outputs/models/mimic_champion_xgboost.joblib
+    outputs/features/mimic_champion_features.json
+    outputs/metrics/mimic_champion_metrics.json, including the chosen
+    hyperparameters, which several later scripts reuse
 """
 
 import time
@@ -35,14 +51,11 @@ import warnings
 warnings.filterwarnings("ignore")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -60,9 +73,7 @@ def set_seed(seed):
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-# ==========================================
-# EVALUATION HELPERS
-# ==========================================
+# --- Evaluation Helpers --------------------------------------------------
 def compute_calibration_metrics(y_true, y_prob):
     eps = 1e-15
     y_prob_clipped = np.clip(y_prob, eps, 1 - eps)
@@ -116,17 +127,13 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
         "Calibration_Intercept": float(cal_intercept)
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 4: Tuning & Training Champion Model (Static + Aggregated)...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Data & Splits ----------------------------------------------
     print("    -> Loading shared tensor, cohort metadata, and exact split indices...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -140,15 +147,11 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT & SCALE FEATURES
-    # ---------------------------------------------------------
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    # --- Extract & Scale Features ----------------------------------------
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     X_static_raw = df_static.fillna(0).values
     
@@ -164,7 +167,12 @@ def main():
     X_max = np.max(X_imputed, axis=1)
     X_std = np.std(X_imputed, axis=1)
     
-    X_temporal_agg = StandardScaler().fit_transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
+    X_temporal_raw = np.concatenate([X_mean, X_min, X_max, X_std], axis=1)
+    
+    # Fit temporal scaler ONLY on the train_val set
+    scaler_temporal = StandardScaler()
+    scaler_temporal.fit(X_temporal_raw[idx_train_val])
+    X_temporal_agg = scaler_temporal.transform(X_temporal_raw)
     
     # Export Feature Names for SHAP
     agg_names = []
@@ -183,9 +191,7 @@ def main():
 
     scale_weight = float((len(y_train_val) - sum(y_train_val)) / sum(y_train_val))
 
-    # ---------------------------------------------------------
-    # 3. BAYESIAN HYPERPARAMETER OPTIMIZATION
-    # ---------------------------------------------------------
+    # --- Bayesian Hyperparameter Optimization ----------------------------
     print(f"\n    -> Running {N_TRIALS} Optuna Trials (3-Fold CV)...")
     
     def objective(trial):
@@ -197,6 +203,8 @@ def main():
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
             "min_child_weight": trial.suggest_int("min_child_weight", 1, 15),
             "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            # Constructor form, forward compatible with xgboost >= 2.0
+            "early_stopping_rounds": 50,
             "scale_pos_weight": scale_weight,
             "eval_metric": "auc",
             "random_state": RANDOM_STATE,
@@ -209,11 +217,9 @@ def main():
         for train_idx, val_idx in cv.split(X_train_val, y_train_val):
             model = XGBClassifier(**params)
             
-            # Added eval_set and early_stopping_rounds
             model.fit(
                 X_train_val[train_idx], y_train_val[train_idx],
                 eval_set=[(X_train_val[val_idx], y_train_val[val_idx])],
-                early_stopping_rounds=50,
                 verbose=False
             )
             
@@ -232,6 +238,9 @@ def main():
     print()
 
     best_params = study.best_params
+    # Early stopping only applies while an eval_set is supplied. The
+    # final refit and every downstream reuse fit without one, so drop the key.
+    best_params.pop("early_stopping_rounds", None)
     best_params.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": -1})
     
     print("\n    [+] Optimal Hyperparameters Found:")
@@ -239,9 +248,7 @@ def main():
         if k not in ["scale_pos_weight", "random_state", "n_jobs"]:
             print(f"        - {k}: {v}")
 
-    # ---------------------------------------------------------
-    # 4. TRAIN & EVALUATE FINAL CHAMPION
-    # ---------------------------------------------------------
+    # --- Train & Evaluate Final Champion ---------------------------------
     print("\n    -> Training Final Champion Model on Full Train/Val Set...")
     champion_xgb = XGBClassifier(**best_params)
     champion_xgb.fit(X_train_val, y_train_val)

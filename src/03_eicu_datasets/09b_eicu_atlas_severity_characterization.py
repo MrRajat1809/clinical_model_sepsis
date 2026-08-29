@@ -1,14 +1,17 @@
 """
-09b_eicu_atlas_clinical_characterization.py
+Embed and annotate the eICU severity manifold.
 
-Takes the precomputed Severity-Preserving DTW pairwise distance matrix and projects it 
-into a 2D manifold using PHATE.
+Runs PHATE on the precomputed severity DTW distance matrix with the same eight
+overlays as the shape manifold. Read against 08b, the difference between the two
+embeddings is attributable to magnitude, which is the only thing the two
+distance metrics treat differently.
 
-Features included:
-- Generates an 8-panel publication-quality figure coloring the eICU manifold by Mortality, 
-  SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to map the 
-  physiological topology of the cohort.
-- Filenames explicitly load and save with `_severity_` tags to prevent clashes with the Shape manifold.
+Reads:
+    outputs/features/eicu_dtw_severity_pairwise_distance_matrix.npy
+    eicu_final_sepsis3_cohort.parquet, imputed and raw tensors
+Writes:
+    outputs/features/eicu_phate_severity_coordinates.parquet
+    outputs/figures/eicu_Severity_Trajectory_Manifold.png
 """
 
 import time
@@ -24,15 +27,11 @@ import phate
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 

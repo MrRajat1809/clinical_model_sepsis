@@ -1,41 +1,43 @@
 """
-02_mimic_confirmed_infection.py
+Identify suspected infection and derive the suspected infection time (SIT).
 
-Applies a strict "Confirmed Infection" filter to the base cohort based on Sepsis-3 guidelines.
-Requires a microbiological culture and an IV antibiotic order that meet specific temporal rules:
-- If culture first: Antibiotics must follow within 72 hours.
-- If antibiotics first: Culture must follow within 24 hours.
+Couples microbiological cultures to intravenous antibiotic administration using
+the Sepsis-3 temporal rules. Antibiotic orders are first collapsed into
+continuous treatment episodes with a gaps-and-islands pass, so that consecutive
+courses and drug switches count as one episode rather than several; a gap of
+more than 24 h between the previous stop and the next start opens a new episode.
 
-Uses a Gaps and Islands SQL approach to calculate cumulative treatment episodes, 
-ensuring continuous antibiotic therapies (even across drug switches) are accurately tracked.
+A culture and an episode are coupled when either:
+    the culture precedes antibiotics by no more than 72 h, or
+    antibiotics precede the culture by no more than 24 h
 
-Features maintained through the pipeline:
-- Updated demographics ('age' calculated at admission).
-- ICU context (first_careunit, admission_type, race).
-- Mortality labels (hospital_expire_flag, dod).
+An episode must reach 72 h of cumulative treatment, waived when the ICU stay is
+shorter than three days. SIT is the earlier of the culture time and the
+antibiotic start time, restricted to +/- 24 h around ICU admission. The earliest
+qualifying event per patient is kept.
+
+Reads:
+    mimic_base_cohort.parquet
+    data/raw/mimiciv/3.1/hosp/{microbiologyevents, prescriptions}
+Writes:
+    mimic_infection_cohort.parquet
 """
 
 import time
 from pathlib import Path
 import duckdb
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 MIMIC_DIR = BASE_DIR / "data" / "raw" / "mimiciv" / "3.1"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing MIMIC-IV confirmed infection filter pipeline...")
     start_time = time.time()
     
-    # Read explicitly named file from Script 01
     base_cohort_file = PROCESSED_DIR / "mimic_base_cohort.parquet"
-    # Write explicitly named output file
     out_file = PROCESSED_DIR / "mimic_infection_cohort.parquet"
     
     if not base_cohort_file.exists():
@@ -171,10 +173,8 @@ def main():
     print("    - Calculating 72-hour cumulative continuous treatment duration")
     print("    - Restricting Suspected Infection Time (SIT) to ICU presentation window")
     
-    # Execute and write directly to Parquet
     con.execute(f"COPY ({query}) TO '{out_file}' (FORMAT PARQUET)")
     
-    # Verify the output
     count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
     elapsed = time.time() - start_time
     

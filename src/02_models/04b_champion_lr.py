@@ -1,12 +1,19 @@
 """
-04b_champion_lr.py
+Elastic-net logistic regression on the primary feature space.
 
-Phase 3: Train the Champion Logistic Regression Model
-Trains and tunes a highly-optimized linear baseline (Logistic Regression with ElasticNet) 
-on the exact same Static + Aggregated feature space used by the XGBoost champion.
-- Serves as the definitive linear benchmark to compare against non-linear architectures.
-- Runs Optuna Bayesian Optimization for exact hyperparameter tuning (C and l1_ratio).
-- Exports the locked model, raw predictions, and comprehensive bootstrap metrics.
+The linear benchmark. Uses the identical 122-dimensional representation, split
+and tuning budget as the gradient-boosted model, so the comparison isolates
+model class rather than feature engineering or search effort.
+
+Regularisation strength and L1/L2 mixing are selected by 30 Optuna trials over
+the same stratified three-fold cross-validation. Class weighting is balanced.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_final_sepsis3_cohort.parquet,
+    the shared split indices
+Writes:
+    outputs/models/mimic_champion_lr.joblib
+    predictions and bootstrapped metrics
 """
 
 import time
@@ -37,14 +44,11 @@ warnings.filterwarnings("ignore")
 warnings.filterwarnings("ignore", category=ConvergenceWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -62,9 +66,7 @@ def set_seed(seed):
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-# ==========================================
-# EVALUATION HELPERS
-# ==========================================
+# --- Evaluation Helpers --------------------------------------------------
 def compute_calibration_metrics(y_true, y_prob):
     eps = 1e-15
     y_prob_clipped = np.clip(y_prob, eps, 1 - eps)
@@ -117,17 +119,13 @@ def evaluate_champion(y_true, y_prob, threshold=0.5, n_bootstraps=1000):
         "Calibration_Intercept": float(cal_intercept)
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 4: Tuning & Training Champion LR (Static + Aggregated)...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Data & Splits ----------------------------------------------
     print("    -> Loading shared tensor, cohort metadata, and exact split indices...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -141,15 +139,11 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT & SCALE FEATURES
-    # ---------------------------------------------------------
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    # --- Extract & Scale Features ----------------------------------------
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
     X_static_raw = df_static.fillna(0).values
     
@@ -165,7 +159,12 @@ def main():
     X_max = np.max(X_imputed, axis=1)
     X_std = np.std(X_imputed, axis=1)
     
-    X_temporal_agg = StandardScaler().fit_transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
+    X_temporal_raw = np.concatenate([X_mean, X_min, X_max, X_std], axis=1)
+    
+    # Fit temporal scaler ONLY on the train_val set
+    scaler_temporal = StandardScaler()
+    scaler_temporal.fit(X_temporal_raw[idx_train_val])
+    X_temporal_agg = scaler_temporal.transform(X_temporal_raw)
     
     # Export Feature Names
     agg_names = []
@@ -182,9 +181,7 @@ def main():
     X_train_val, y_train_val = X_fused[idx_train_val], y[idx_train_val]
     X_test, y_test = X_fused[idx_test], y[idx_test]
 
-    # ---------------------------------------------------------
-    # 3. BAYESIAN HYPERPARAMETER OPTIMIZATION (ElasticNet)
-    # ---------------------------------------------------------
+    # --- BAYESIAN HYPERPARAMETER OPTIMIZATION (ElasticNet) ---------------
     print(f"\n    -> Running {N_TRIALS} Optuna Trials (3-Fold CV) for Logistic Regression...")
     
     def objective(trial):
@@ -235,9 +232,7 @@ def main():
         if k not in ["random_state", "n_jobs", "max_iter"]:
             print(f"        - {k}: {v}")
 
-    # ---------------------------------------------------------
-    # 4. TRAIN & EVALUATE FINAL CHAMPION LR
-    # ---------------------------------------------------------
+    # --- Train & Evaluate Final Champion Lr ------------------------------
     print("\n    -> Training Final Champion LR Model on Full Train/Val Set...")
     champion_lr = LogisticRegression(**best_params)
     champion_lr.fit(X_train_val, y_train_val)

@@ -1,15 +1,22 @@
 """
-09a_mimic_DTW_atlas_severity.py
+Pairwise DTW distance matrix preserving absolute severity.
 
-Computes the pairwise Dynamic Time Warping (DTW) distance matrix for the fully imputed 
-3D time-series tensor to map the patient trajectory manifold based on ABSOLUTE CLINICAL STATE.
+Severity counterpart to 08a. One global scaler is fitted across all patients and
+all hours, so every variable contributes comparably to the distance while the
+absolute magnitude of each patient's state is preserved. Two patients are close
+only if they are both similarly shaped and similarly sick.
 
-Features included:
-- Applies a global 2D StandardScaler across all patients and timesteps. This ensures 
-  all physiological variables are weighted equally by the DTW distance metric, while 
-  preserving the absolute magnitude (severity) of the patient's condition.
-- Represents the multi-organ "severity" counterpart to the previously computed "shape" atlas.
-- Filenames explicitly designated with `_severity_` to prevent clashes with the Shape manifold.
+Comparing this manifold against the shape manifold separates how a patient
+deteriorates from how far they deteriorate.
+
+Same O(N^2) cost as 08a; see run_dtw_phate_atlas.sh.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_sepsis_tensor_stay_ids.npy
+Writes:
+    outputs/features/mimic_dtw_severity_pairwise_distance_matrix.npy
+    outputs/features/mimic_severity_atlas_stay_ids.npy
+    outputs/metrics/mimic_severity_atlas_metadata.json
 """
 
 import time
@@ -25,15 +32,11 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -47,7 +50,6 @@ def run_clinical_atlas():
     OUT_MODELS.mkdir(parents=True, exist_ok=True)
     OUT_METRICS.mkdir(parents=True, exist_ok=True)
     
-    # Inputs from previous scripts
     tensor_file = PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy"
     id_file = PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy"
     

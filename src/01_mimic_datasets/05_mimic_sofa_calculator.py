@@ -1,33 +1,48 @@
 """
-05_mimic_sofa_calculator.py
+Apply the Sepsis-3 criteria and fix the sepsis onset time.
 
-Calculates the dynamic 6-organ SOFA score to identify an acute increase of >= 2 points.
-- Baseline Window: -48 hours up to Suspected Infection Time (SIT)
-- Acute Window: SIT up to +24 hours
-- Missing baseline SOFA scores are clinically imputed as 0 (per Sepsis-3 guidelines).
+Computes the six-organ SOFA score in two windows and keeps stays whose score
+rises by at least two points:
 
-Establishes the final Sepsis-3 cohort and re-evaluates Sepsis Onset Time 
-as the exact intersection of suspected infection and the first abnormal organ failure event.
+    baseline   -48 h up to, but not including, SIT
+    acute      SIT (inclusive) to +24 h
 
-Features included:
-- Removed synthetic NEQ approximation. Implemented exact, strict Sepsis-3 
-  Cardiovascular SOFA definitions using individual raw vasopressor dosages (Dopamine, 
-  Dobutamine, Epinephrine, Norepinephrine).
+Each component uses the worst qualifying value in its window. The respiratory
+component requires concurrent mechanical ventilation for its two highest levels.
+The cardiovascular component scores the recorded dopamine, epinephrine,
+norepinephrine and dobutamine doses directly rather than a derived equivalent,
+falling back to mean arterial pressure when no vasoactive drug is running.
+
+Sepsis onset is the later of SIT and the earliest acute-window observation that
+crosses any organ-dysfunction threshold, so onset marks the point where
+suspected infection and organ failure actually coincide. GCS thresholds are
+component-specific (eye < 4, verbal < 5, motor < 6) because the components have
+different maxima.
+
+Missing-data convention:
+    A component with no qualifying observation scores 0, and absent GCS
+    components are filled to normal before the total is formed. This follows the
+    usual Sepsis-3 operationalisation, but it interacts with the recording
+    density difference between the two databases: a variable charted less often
+    in one cohort will systematically score lower there.
+
+Reads:
+    mimic_sepsis_phenotype_cohort.parquet
+    mimic_sepsis_temporal_data_cleaned.parquet
+Writes:
+    mimic_final_sepsis3_cohort.parquet, carrying sepsis_onset_time,
+    baseline_sofa and baseline_pf_ratio for downstream use
 """
 
 import time
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing MIMIC-IV dynamic SOFA calculation pipeline...")
     start_time = time.time()
@@ -35,7 +50,6 @@ def main():
     # Read explicitly named files from Scripts 03 and 04b
     temporal_file = PROCESSED_DIR / "mimic_sepsis_temporal_data_cleaned.parquet"
     cohort_file = PROCESSED_DIR / "mimic_sepsis_phenotype_cohort.parquet"
-    # Write explicitly named output file
     out_file = PROCESSED_DIR / "mimic_final_sepsis3_cohort.parquet"
     
     if not temporal_file.exists():
@@ -48,9 +62,9 @@ def main():
 
     itemid_map = {
         220181: "map", 220052: "map",         
-        227457: "platelets", 51265: "platelets",
-        225664: "bilirubin", 50885: "bilirubin",
-        220615: "creatinine", 50912: "creatinine",
+        51265: "platelets",
+        50885: "bilirubin",
+        50912: "creatinine",
         220739: "gcs_eye",     
         223900: "gcs_verbal",
         223901: "gcs_motor",
@@ -222,7 +236,9 @@ def main():
             ((pl.col("variable") == "bilirubin") & (pl.col("valuenum") >= 1.2)) |
             ((pl.col("variable") == "creatinine") & (pl.col("valuenum") >= 1.2)) |
             ((pl.col("variable").is_in(["dopamine", "epinephrine", "norepinephrine", "dobutamine"])) & (pl.col("valuenum") > 0)) |
-            ((pl.col("variable").is_in(["gcs_motor", "gcs_verbal", "gcs_eye"])) & (pl.col("valuenum") < 6))
+            ((pl.col("variable") == "gcs_eye") & (pl.col("valuenum") < 4)) |
+            ((pl.col("variable") == "gcs_verbal") & (pl.col("valuenum") < 5)) |
+            ((pl.col("variable") == "gcs_motor") & (pl.col("valuenum") < 6))
         )
     ).group_by("stay_id").agg(
         pl.col("event_time").min().alias("sofa_deterioration_time")

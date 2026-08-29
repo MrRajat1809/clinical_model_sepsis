@@ -1,29 +1,40 @@
 """
-01_eicu_cohort.py
+Build the eICU-CRD adult ICU base cohort.
 
-Extracts the foundational unique adult ICU cohort from the eICU Collaborative Research Database.
-Mirrors the exact inclusion/exclusion criteria used for MIMIC-IV to ensure valid external validation:
-- First ICU stay only per patient.
-- Age >= 18 (Handling eICU's '> 89' string encoding).
-- ICU Length of Stay >= 24 hours.
-- Excludes: Elective surgical admissions (via apachePredVar) to prevent prophylactic bias.
-- Maps column names strictly to MIMIC-IV conventions (stay_id, subject_id, hospital_expire_flag).
+Mirrors the MIMIC-IV inclusion criteria exactly so the external cohort is not
+defined more or less strictly than the development cohort, and maps eICU column
+names onto the MIMIC-IV schema used throughout the project.
+
+Inclusion:
+    first ICU stay per patient, ICU length of stay >= 24 h, age >= 18 years
+Exclusion:
+    elective surgery, taken from the APACHE predictor table
+
+Two eICU-specific handling rules:
+    ages recorded as "> 89" become 91, following the de-identification scheme
+    stay order is proxied by ascending stay identifier, because eICU carries no
+    absolute admission timestamp; this is a limitation of the database, not a
+    choice, and is stated in the manuscript
+
+Length of stay is derived from the unit discharge offset, which eICU records in
+minutes.
+
+Reads:
+    data/raw/eicu-crd/2.0/{patient, apachePredVar}
+Writes:
+    eicu_base_cohort.parquet
 """
 
 import time
 from pathlib import Path
 import duckdb
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 OUT_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Executing eICU base cohort extraction pipeline...")
     start_time = time.time()

@@ -1,14 +1,23 @@
 """
-06_mimic_seymour_verification.py
+Positive control: recover the Seymour sepsis endotypes by clustering.
 
-Performs a static K-Means clustering (k=4) on the final Sepsis-3 cohort
-to verify alignment with Seymour et al.'s clinical endotypes (Alpha, Beta, Gamma, Delta).
-Acts as a biological and clinical "positive control" for the cohort extraction.
+A check that cohort construction preserved recognised sepsis biology, not a
+modelling step. Nothing downstream consumes its output.
 
-Features included:
-- Utilizes the standardized 'age' variable.
-- Utilizes the 'hospital_expire_flag' already propagated into the final Sepsis-3 
-  cohort file, eliminating the need for redundant DuckDB mortality joins.
+Takes age and the mean of nine routine measurements over the first 24 h after
+onset, median-imputes, standardises, and runs k-means with k = 4. Clusters are
+labelled against Seymour et al. by a fixed rule applied in order: highest
+mortality is delta, highest mean creatinine among those left is beta, lowest
+mortality among those left is alpha, and the remainder is gamma.
+
+If extraction worked, the four groups should separate with the expected
+mortality gradient. The same script exists for eICU, so the two can be compared.
+
+Reads:
+    mimic_final_sepsis3_cohort.parquet
+    mimic_sepsis_temporal_data_cleaned.parquet
+Writes:
+    outputs/metrics/mimic_seymour_endotype_summary.csv
 """
 
 import time
@@ -19,15 +28,11 @@ from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing Seymour Sepsis Phenotype Verification...")
     start_time = time.time()
@@ -149,6 +154,11 @@ def main():
     cols = ["cluster", "Endotype", "Patient_Count", "Mortality_Rate", "Mean_Age", "Mean_Lactate", "Mean_Creatinine", "Mean_WBC", "Mean_MAP"]
     summary = summary[cols]
     
+    # Persist, mirroring what the eICU script already does
+    _out = BASE_DIR / "outputs" / "metrics"
+    _out.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(_out / "mimic_seymour_endotype_summary.csv", index=False)
+
     # Format numeric outputs
     summary["Mortality_Rate"] = (summary["Mortality_Rate"] * 100).round(1).astype(str) + "%"
     for col in ["Mean_Age", "Mean_Lactate", "Mean_Creatinine", "Mean_WBC", "Mean_MAP"]:

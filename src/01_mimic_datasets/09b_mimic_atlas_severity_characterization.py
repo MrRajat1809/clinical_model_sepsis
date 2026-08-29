@@ -1,16 +1,17 @@
 """
-09b_mimic_atlas_severity_characterization.py
+Embed and annotate the severity manifold.
 
-Takes the precomputed Severity-Preserving DTW pairwise distance matrix and projects it 
-into a 2D manifold using PHATE.
+Severity counterpart to 08b. Runs PHATE on the precomputed severity DTW distance
+matrix and applies the same eight clinical overlays, so the two manifolds can be
+read side by side: differences between them are attributable to magnitude, since
+that is the only thing the two distance metrics disagree about.
 
-Features included:
-- Generates an 8-panel publication-quality figure coloring the manifold by Mortality, 
-  SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to map the 
-  physiological topology of the cohort.
-- Extracted ventilation status from the RAW tensor to bypass continuous neural 
-  network hallucinations.
-- Filenames explicitly load and save with `_severity_` tags to prevent clashes with the Shape manifold.
+Reads:
+    outputs/features/mimic_dtw_severity_pairwise_distance_matrix.npy
+    mimic_final_sepsis3_cohort.parquet, imputed and raw tensors
+Writes:
+    outputs/features/mimic_phate_severity_coordinates.parquet
+    outputs/figures/mimic_Severity_Trajectory_Manifold.png
 """
 
 import time
@@ -26,15 +27,11 @@ import phate
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 

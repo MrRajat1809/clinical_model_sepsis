@@ -1,0 +1,5 @@
+# Shell scripts MUST stay LF or they will not run inside the Linux container.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.tex  text eol=lf
+*.json text eol=lf

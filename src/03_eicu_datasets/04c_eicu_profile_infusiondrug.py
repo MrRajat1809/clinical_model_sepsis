@@ -1,15 +1,25 @@
 """
-04c_eicu_profile_infusiondrug.py
+Profile the infusionDrug table before writing any extraction rules.
 
-Profiles the raw eICU `infusionDrug` table specifically for the base Sepsis Phenotype cohort.
-Outputs frequency counts for drug names and rate strings to inform 
-the creation of rigorous, data-driven regex matching and unit conversion dictionaries.
+Diagnostic, not part of the data path. eICU records infusion drug names and
+rates as free text with no controlled vocabulary, so the extraction and unit
+conversion in 04d and 04e have to be written against what is actually present
+rather than what the schema suggests.
 
-Features included:
-- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
-  circular dependency, allowing this to run BEFORE the final SOFA calculator (05).
-- Removed erroneous call to 'patientweight' from the cohort file. 
-  We only need 'stay_id' to filter the infusion table for profiling.
+Reports, restricted to the sepsis cohort so the counts reflect the population
+that matters:
+    missingness in drug name, drug rate and infusion rate
+    the 200 most frequent drug names
+    the 100 most frequent rate strings, which is where the embedded units show
+
+Run this first when the eICU version changes or the pressor extraction looks
+wrong.
+
+Reads:
+    eicu_sepsis_phenotype_cohort.parquet
+    data/raw/eicu-crd/2.0/infusionDrug
+Writes:
+    outputs/metrics/eicu_infusiondrug_profile.json and a readable text report
 """
 
 import time
@@ -17,14 +27,11 @@ import json
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 RAW_EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# Flattened Artifact Output
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 
 def profile_infusion_drugs():
@@ -34,7 +41,7 @@ def profile_infusion_drugs():
     OUT_METRICS.mkdir(parents=True, exist_ok=True)
     
     infusion_file = RAW_EICU_DIR / "infusionDrug.csv.gz"
-    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    # Point to the Phenotype cohort to allow execution before script 05
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_json = OUT_METRICS / "eicu_infusiondrug_profile.json"
     out_txt = OUT_METRICS / "eicu_infusiondrug_profile_report.txt"
@@ -66,9 +73,7 @@ def profile_infusion_drugs():
     total_records = df_joined.height
     print(f"    -> Extracted {total_records:,} infusion records for the cohort.")
 
-    # ---------------------------------------------------------
-    # PROFILING METRICS
-    # ---------------------------------------------------------
+    # --- Profiling Metrics -----------------------------------------------
     print("    -> Calculating missingness and generating frequency distributions...")
     
     # 1. Missingness

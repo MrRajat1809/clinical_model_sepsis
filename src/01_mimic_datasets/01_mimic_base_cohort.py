@@ -1,32 +1,36 @@
 """
-01_mimic_base_cohort.py
+Build the MIMIC-IV adult ICU base cohort.
 
-Extracts the foundational unique adult ICU cohort from MIMIC-IV.
-Filters: First ICU stay only, Age >= 18, ICU Length of Stay >= 24 hours.
-Excludes: Elective surgical admissions to reduce prophylactic antibiotic false positives.
+First step of the development-cohort pipeline. Joins the ICU stay, patient and
+admission tables in DuckDB and applies the inclusion criteria shared with eICU,
+so that the two cohorts are assembled under the same rules. Age is computed at
+admission from the anchor age and anchor year rather than taken as recorded.
 
-Features included:
-- Mortality labels (hospital_expire_flag, dod).
-- ICU context (first_careunit).
-- Exact age calculation at admission.
+Inclusion:
+    first ICU stay per patient, ICU length of stay >= 24 h, age >= 18 years
+Exclusion:
+    elective admissions, which would otherwise contribute prophylactic
+    antibiotic exposure that mimics the infection signal
 
-Exports to a highly compressed Parquet file for downstream steps.
+Reads:
+    data/raw/mimiciv/3.1/{icu/icustays, hosp/patients, hosp/admissions}
+Writes:
+    mimic_base_cohort.parquet
+
+The query streams straight to Parquet via COPY, so the full table is never
+materialised in memory.
 """
 
 import time
 from pathlib import Path
 import duckdb
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 MIMIC_DIR = BASE_DIR / "data" / "raw" / "mimiciv" / "3.1"
 OUT_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing MIMIC-IV base ICU cohort extraction pipeline...")
     start_time = time.time()
@@ -87,7 +91,6 @@ def main():
     # Execute and write directly to Parquet to save RAM
     con.execute(f"COPY ({query}) TO '{out_file}' (FORMAT PARQUET)")
     
-    # Verify the output
     count = con.execute(f"SELECT COUNT(*) FROM '{out_file}'").fetchone()[0]
     elapsed = time.time() - start_time
     

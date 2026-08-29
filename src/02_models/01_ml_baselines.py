@@ -1,16 +1,28 @@
 """
-01_ml_baselines.py
+Classical machine-learning baselines, and the split every later script reuses.
 
-Phase 1: ML Baselines
-Establishes the traditional machine learning benchmarks for mortality prediction.
-Evaluates Logistic Regression (Static), Logistic Regression (Combined), 
-Random Forest (Combined), and XGBoost (Combined).
+Runs first in the modelling stage for one structural reason: it draws the
+patient-level 85/15 development/test partition, stratified by mortality with a
+fixed seed, and writes the indices to disk. Every subsequent script loads those
+indices instead of splitting again, so all models are compared on identical
+patients and the held-out set stays held out.
 
-Engineered to be a reusable foundation:
-- Exports trained model objects (.joblib) for downstream reuse.
-- Exports exact train/test indices and stay_ids to enforce reproducibility across all scripts.
-- Exports raw prediction arrays.
-- Computes comprehensive metrics (Bootstrapped CIs, Confusion Matrix, Calibration).
+Feature space (122 dimensions), shared with the primary model:
+    4 static      age, baseline SOFA, Charlson index, sex
+    120 temporal  mean, minimum, maximum and standard deviation of each of the
+                  30 dynamic variables over the 24 h window
+Scalers are fitted on the development partition only and applied to the test
+partition unchanged.
+
+Models: logistic regression on static variables alone, logistic regression on
+the full space, a 500-tree random forest, and gradient-boosted trees with early
+stopping on an internal validation split. All are class-weighted.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_final_sepsis3_cohort.parquet
+Writes:
+    outputs/models/mimic_{train_indices, test_set_indices, stay_ids_*}.npy
+    fitted models, per-patient predictions, and bootstrapped metrics
 """
 
 import time
@@ -35,14 +47,11 @@ from xgboost import XGBClassifier
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & DIRECTORIES
-# ==========================================
+# --- Configuration & Directories -----------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Structured outputs based on the flattened artifact paradigm
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -54,9 +63,7 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FEATS]:
 RANDOM_STATE = 42
 N_BOOTSTRAPS = 100
 
-# ==========================================
-# HELPER FUNCTIONS
-# ==========================================
+# --- Helper Functions ----------------------------------------------------
 def compute_calibration_metrics(y_true, y_prob):
     """Computes calibration slope and intercept using logistic regression on logits."""
     eps = 1e-15
@@ -119,16 +126,12 @@ def evaluate_model(y_true, y_prob, threshold=0.5, n_bootstraps=100):
         "Calibration_Intercept": float(cal_intercept)
     }
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Initiating Phase 1: Comprehensive ML Baselines...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD DATA
-    # ---------------------------------------------------------
+    # --- Load Data & Define Splits Early ---------------------------------
     print("    -> Loading imputed tensor and static cohort metadata...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -138,17 +141,27 @@ def main():
     df_cohort = pd.DataFrame({"stay_id": stay_ids}).merge(df_cohort, on="stay_id", how="left")
     y = df_cohort["hospital_expire_flag"].values
     
-    # ---------------------------------------------------------
-    # 2. EXTRACT FEATURES & EXPORT NAMES
-    # ---------------------------------------------------------
-    potential_statics = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    print("    -> Splitting data and saving exact indices...")
+    idx_train, idx_test = train_test_split(np.arange(len(y)), test_size=0.15, random_state=RANDOM_STATE, stratify=y)
+    
+    # Save Splits immediately
+    np.save(OUT_MODELS / "mimic_train_indices.npy", idx_train)
+    np.save(OUT_MODELS / "mimic_test_set_indices.npy", idx_test)
+    np.save(OUT_MODELS / "mimic_stay_ids_train.npy", stay_ids[idx_train])
+    np.save(OUT_MODELS / "mimic_stay_ids_test.npy", stay_ids[idx_test])
+
+    # --- Extract & Scale Features (leakage Free) -------------------------
+    potential_statics = ["age", "baseline_sofa"]
     static_cols = [col for col in potential_statics if col in df_cohort.columns]
     
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
         
-    X_static = StandardScaler().fit_transform(df_static.fillna(0).values)
+    X_static_raw = df_static.fillna(0).values
+    
+    # Fit scaler ONLY on train indices
+    scaler_static = StandardScaler()
+    scaler_static.fit(X_static_raw[idx_train])
+    X_static = scaler_static.transform(X_static_raw)
     
     # Aggregated Temporal Features
     print("    -> Flattening temporal tensor (Mean, Min, Max, Std)...")
@@ -156,7 +169,13 @@ def main():
     X_min = np.min(X_imputed, axis=1)
     X_max = np.max(X_imputed, axis=1)
     X_std = np.std(X_imputed, axis=1)
-    X_temporal_agg = StandardScaler().fit_transform(np.concatenate([X_mean, X_min, X_max, X_std], axis=1))
+    
+    X_temporal_raw = np.concatenate([X_mean, X_min, X_max, X_std], axis=1)
+    
+    # Fit temporal scaler ONLY on train indices
+    scaler_temporal = StandardScaler()
+    scaler_temporal.fit(X_temporal_raw[idx_train])
+    X_temporal_agg = scaler_temporal.transform(X_temporal_raw)
     
     # Feature Names
     agg_names = []
@@ -173,31 +192,18 @@ def main():
 
     X_combined = np.concatenate([X_static, X_temporal_agg], axis=1)
 
-    # ---------------------------------------------------------
-    # 3. SPLITS & PREVALENCE
-    # ---------------------------------------------------------
-    print("    -> Splitting data and saving exact indices...")
-    idx_train, idx_test = train_test_split(np.arange(len(y)), test_size=0.15, random_state=RANDOM_STATE, stratify=y)
-    
-    # Save Splits to the models directory (used across pipeline to guarantee same test sets)
-    np.save(OUT_MODELS / "mimic_train_indices.npy", idx_train)
-    np.save(OUT_MODELS / "mimic_test_set_indices.npy", idx_test)
-    np.save(OUT_MODELS / "mimic_stay_ids_train.npy", stay_ids[idx_train])
-    np.save(OUT_MODELS / "mimic_stay_ids_test.npy", stay_ids[idx_test])
-    
+    # --- Prepare Model Inputs --------------------------------------------
     X_stat_train, X_stat_test = X_static[idx_train], X_static[idx_test]
     X_comb_train, X_comb_test = X_combined[idx_train], X_combined[idx_test]
     y_train, y_test = y[idx_train], y[idx_test]
     stay_ids_test = stay_ids[idx_test]
     
-    print(f"        - Training Cohort: {len(y_train)} patients | Mortality: {(sum(y_train)/len(y_train))*100:.1f}%")
-    print(f"        - Testing Cohort:  {len(y_test)} patients | Mortality: {(sum(y_test)/len(y_test))*100:.1f}%")
+    print(f"       - Training Cohort: {len(y_train)} patients | Mortality: {(sum(y_train)/len(y_train))*100:.1f}%")
+    print(f"       - Testing Cohort:  {len(y_test)} patients | Mortality: {(sum(y_test)/len(y_test))*100:.1f}%")
 
     scale_weight = float((len(y_train) - sum(y_train)) / sum(y_train))
 
-    # ---------------------------------------------------------
-    # 4. INITIALIZE & TRAIN MODELS
-    # ---------------------------------------------------------
+    # --- Initialize & Train Models ---------------------------------------
     print("\n    -> Training and Evaluating Models...")
     results_list = []
     full_metrics_dict = {}
@@ -257,9 +263,7 @@ def main():
     }
     results_list.append({"Model": "XGBoost_Combined", "AUROC": xgb_metrics["AUROC"], "AUPRC": xgb_metrics["AUPRC"], "Brier": xgb_metrics["Brier"]})
 
-    # ---------------------------------------------------------
-    # 5. EXPORT & DISPLAY LEADERBOARD
-    # ---------------------------------------------------------
+    # --- Export & Display Leaderboard ------------------------------------
     with open(OUT_METRICS / "mimic_detailed_baseline_metrics.json", "w") as f:
         json.dump(full_metrics_dict, f, indent=4)
         

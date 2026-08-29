@@ -1,10 +1,24 @@
 """
-07c_feature_parity_audit.py
+Compare pre-imputation recording density between the two cohorts.
 
-Final Canonical Feature Parity Audit (Tensor-Level)
-Audits the exact 3D raw tensors (pre-imputation) passed to the SAITS model.
-Calculates true cell-level density (non-NaN percentage) across the 24-hour window
-for the exact Sepsis-3 cohorts in both MIMIC-IV and eICU.
+Measures how much real data each database actually contains for each of the 30
+variables, before any reconstruction. Density is the share of patient-hour cells
+carrying an observation, computed on the raw tensors, so it reflects charting
+practice rather than what the imputation model produced.
+
+This is the evidence behind two claims in the manuscript: that the databases
+record different things at different rates, and that the absent-scores-zero
+convention in the SOFA calculators therefore affects them unequally. A feature
+with high MIMIC-IV density and near-zero eICU density cannot transport, whatever
+the model does with it.
+
+Asserts that the two feature orders match before comparing, since a silent
+reorder would make every row meaningless.
+
+Reads:
+    mimic_sepsis_tensor_raw.npy, eicu_sepsis_tensor_raw.npy, and feature names
+Writes:
+    outputs/metrics/feature_parity_density.csv
 """
 
 import numpy as np
@@ -60,6 +74,7 @@ def run_audit():
     print(f"{'Feature':<15} | {'MIMIC N (Hrs)':<15} | {'eICU N (Hrs)':<15} | {'M_Dens%':<7} | {'e_Dens%':<7} | {'Δ Diff%':<8}")
     print("-" * 89)
 
+    parity_rows = []
     for i, feature in enumerate(m_feats):
         # Extract the specific feature slice across all patients and all 24 hours
         m_slice = m_X[:, :, i]
@@ -79,6 +94,9 @@ def run_audit():
         # Flag major discrepancies (e.g., completely missing or >30% drift)
         flag = "🚨" if e_dens == 0.0 or d_diff > 30.0 else ""
         
+        parity_rows.append({"feature": feature, "mimic_n_hours": m_n, "eicu_n_hours": e_n,
+                            "mimic_density_pct": round(m_dens, 2), "eicu_density_pct": round(e_dens, 2),
+                            "abs_density_diff_pct": round(d_diff, 2)})
         print(f"{feature.upper():<15} | {m_n:<15,} | {e_n:<15,} | {m_dens:>6.2f}% | {e_dens:>6.2f}% | {d_diff:>6.2f}% {flag}")
         
     # Print overall tensor sparsity
@@ -86,6 +104,14 @@ def run_audit():
     e_overall = np.mean(~np.isnan(e_X)) * 100
     
     print("-" * 89)
+    import pandas as _pd
+    _metrics = BASE_DIR / "outputs" / "metrics"
+    _metrics.mkdir(parents=True, exist_ok=True)
+    parity_rows.append({"feature": "OVERALL", "mimic_n_hours": None, "eicu_n_hours": None,
+                        "mimic_density_pct": round(m_overall, 2), "eicu_density_pct": round(e_overall, 2),
+                        "abs_density_diff_pct": round(abs(m_overall - e_overall), 2)})
+    _pd.DataFrame(parity_rows).to_csv(_metrics / "feature_parity_density.csv", index=False)
+
     print(f"{'OVERALL DENSITY':<15} | {'-':<15} | {'-':<15} | {m_overall:>6.2f}% | {e_overall:>6.2f}% | {abs(m_overall-e_overall):>6.2f}%")
     print("=========================================================================================")
 

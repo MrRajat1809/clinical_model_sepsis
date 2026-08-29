@@ -1,15 +1,24 @@
 """
-08b_mimic_atlas_shape_characterization.py
+Embed and annotate the shape manifold.
 
-Takes the precomputed SHAPE-BASED DTW pairwise distance matrix (MeanVariance scaled) 
-and projects it into a 2D manifold using PHATE.
+Second half of the shape manifold. Runs PHATE directly on the precomputed DTW
+distance matrix (knn_dist='precomputed'), so the embedding inherits the
+shape-only geometry rather than recomputing distances in feature space.
 
-Features included: 
-- Generates an 8-panel publication-quality figure coloring the manifold by Mortality, 
-  SOFA, Lactate, NEQ, P/F Ratio, Urine Output, Ventilation, and Age to compare side-by-side 
-  against the Severity Atlas.
-- Applied the raw-data ventilation extraction and muted color shuffling to prevent overplotting.
-- Explicitly loads the `_shape_` distance matrix and outputs explicit shape artifacts.
+The resulting two-dimensional coordinates are overlaid with hospital mortality,
+baseline SOFA, maximum lactate, maximum vasopressor dose, worst PaO2/FiO2 ratio,
+total 24 h urine output, mechanical ventilation and age, to show which clinical
+gradients the trajectory shape actually tracks.
+
+Ventilation is read from the raw rather than the imputed tensor, since a
+continuous reconstruction of a binary indicator is not meaningful.
+
+Reads:
+    outputs/features/mimic_dtw_shape_pairwise_distance_matrix.npy
+    mimic_final_sepsis3_cohort.parquet, imputed and raw tensors
+Writes:
+    outputs/features/mimic_phate_shape_coordinates.parquet
+    outputs/figures/mimic_Shape_Trajectory_Manifold.png
 """
 
 import time
@@ -25,15 +34,11 @@ import phate
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
@@ -44,7 +49,6 @@ def run_shape_atlas_characterization():
     OUT_FEATS.mkdir(parents=True, exist_ok=True)
     OUT_FIGURES.mkdir(parents=True, exist_ok=True)
     
-    # Inputs
     dist_matrix_file = OUT_FEATS / "mimic_dtw_shape_pairwise_distance_matrix.npy"
     stay_id_file = OUT_FEATS / "mimic_shape_atlas_stay_ids.npy"
     cohort_file = PROCESSED_DIR / "mimic_final_sepsis3_cohort.parquet"
@@ -52,7 +56,6 @@ def run_shape_atlas_characterization():
     raw_tensor_file = PROCESSED_DIR / "mimic_sepsis_tensor_raw.npy"  
     features_file = PROCESSED_DIR / "mimic_sepsis_tensor_features.npy"
     
-    # Outputs
     atlas_coords_file = OUT_FEATS / "mimic_phate_shape_coordinates.parquet"
     plot_file = OUT_FIGURES / "mimic_Shape_Trajectory_Manifold.png"
     

@@ -1,14 +1,26 @@
 """
-07b_eicu_saits_imputation.py
+Reconstruct the eICU tensor using the locked MIMIC-IV imputation model.
 
-Applies the permanently locked PyPOTS SAITS model (trained on MIMIC-IV) to the eICU dataset.
+Inference only. The scaler and SAITS weights fitted on MIMIC-IV are loaded and
+applied unchanged; nothing is refitted on eICU. This is what keeps the external
+cohort a genuine target domain, and it means any difference between the two
+imputed tensors reflects the data rather than two separately fitted models.
 
-Features included:
-- Strictly adheres to external validation guidelines by PREVENTING retraining:
-  * Loads the fitted StandardScaler from the MIMIC-IV models directory.
-  * Loads the locked SAITS model weights from the MIMIC-IV models directory.
-- Imputes the 82% missingness in eICU using the temporal dynamics learned from MIMIC-IV.
-- Reverses transformations, clips to physiological bounds, and exports QC reports.
+The same preparation as training is reapplied in the same order: log1p on the
+six skewed variables, the locked scaler, inference, then inverse scaling,
+expm1, and clipping to physiological ranges.
+
+eICU is considerably sparser than MIMIC-IV, so a larger share of this tensor is
+reconstructed. The QC report gives per-feature pre-imputation missingness
+alongside the imputed distribution, and the feature parity audit in 07c
+quantifies the gap directly.
+
+Reads:
+    eicu_sepsis_tensor_raw.npy and its feature names
+    outputs/models/{mimic_saits_scaler.joblib, mimic_saits_model_weights.pypots}
+Writes:
+    eicu_sepsis_imputed_tensor.npy
+    outputs/metrics/eicu_saits_qc_report.csv and distribution plots
 """
 
 import time
@@ -24,9 +36,7 @@ from pypots.imputation import SAITS
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 np.random.seed(42)
 torch.manual_seed(42)
 

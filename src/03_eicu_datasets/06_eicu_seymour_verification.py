@@ -1,17 +1,19 @@
 """
-06_eicu_seymour_verification.py
+Positive control: recover the Seymour sepsis endotypes in eICU.
 
-Performs a static K-Means clustering (k=4) on the final eICU Sepsis-3 cohort
-to verify alignment with Seymour et al.'s clinical endotypes (Alpha, Beta, Gamma, Delta).
+Same check as the MIMIC-IV version, run on the external cohort. If the eICU
+extraction preserved sepsis biology despite the different schema and the
+diagnosis-based infection definition, the same four endotypes should emerge with
+the same mortality gradient. Purely diagnostic; nothing downstream uses it.
 
-This acts as a biological and clinical "positive control" for the cohort extraction.
-If the eICU extraction was successful, we should see the same 4 distinct phenotypes 
-emerge with their expected mortality gradients, proving that we haven't lost the 
-biological signal of sepsis while navigating the eICU schema.
+Clustering columns are cast to numeric explicitly, because a column that is
+entirely null in eICU would otherwise arrive as object dtype and fail during
+aggregation.
 
-Features included:
-- Added explicit numeric casting to prevent Pandas object-type errors 
-  when clustering columns contain entirely null values.
+Reads:
+    eicu_final_sepsis3_cohort.parquet, eicu_sepsis_temporal_data_cleaned.parquet
+Writes:
+    outputs/metrics/eicu_seymour_endotype_summary.csv
 """
 
 import time
@@ -24,19 +26,14 @@ from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# Flattened Artifact Output
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_METRICS.mkdir(parents=True, exist_ok=True)
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Executing eICU Seymour Sepsis Phenotype Verification...")
     start_time = time.time()

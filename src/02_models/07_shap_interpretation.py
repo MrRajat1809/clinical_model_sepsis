@@ -1,14 +1,24 @@
 """
-07_shap_interpretation.py
+Consensus SHAP attribution across 50 model seeds.
 
-Phase 6: Model Interpretation (True 50-Model Consensus SHAP)
-Unlocks the Champion XGBoost black box to extract clinical physiological rules.
-1. Reconstructs the exact MIMIC-IV hold-out train and test feature spaces.
-2. Extracts hyperparameters from the locked Champion model.
-3. Trains 50 independent XGBoost models with different initialization seeds.
-4. Computes and averages exact SHAP values across all 50 runs for robust 
-   Consensus SHAP global feature importance.
-5. Exports data for publication-quality plotting.
+A single model's SHAP values reflect one particular fit as much as the data, so
+this refits the primary configuration under 50 different random seeds and
+aggregates. Exact tree SHAP values are computed on the held-out test set for
+each fit.
+
+Two aggregations are produced:
+    patient level  attributions averaged across seeds, for beeswarm plots
+    global         mean absolute SHAP per seed, then the mean and 2.5th-97.5th
+                   percentile across seeds, so feature importance carries an
+                   interval reflecting initialisation variance
+
+Reads:
+    outputs/models/mimic_champion_xgboost.joblib for the configuration
+    outputs/features/mimic_champion_features.json
+Writes:
+    outputs/features/mimic_consensus_feature_importance.csv
+    outputs/features/mimic_shap_values_exact_test.npy
+    outputs/features/mimic_top_20_consensus_features.json
 """
 
 import os
@@ -26,12 +36,9 @@ from sklearn.base import clone
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Input Tensors & Cohort mapped to flat structure
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_FEATS = BASE_DIR / "outputs" / "features"
@@ -51,17 +58,13 @@ def set_seed(seed):
     np.random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(BASE_SEED)
     print(f"[*] Initiating Phase 8: True {N_MODELS}-Model Consensus SHAP Interpretation...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD CHAMPION MODEL & METADATA
-    # ---------------------------------------------------------
+    # --- Load Champion Model & Metadata ----------------------------------
     if not CHAMPION_MODEL_FILE.exists() or not FEAT_NAMES_FILE.exists():
         print(f"[ERROR] Required files not found. Check: {CHAMPION_MODEL_FILE}")
         return
@@ -72,9 +75,7 @@ def main():
     with open(FEAT_NAMES_FILE, "r") as f:
         feature_names = json.load(f)
 
-    # ---------------------------------------------------------
-    # 2. RECONSTRUCT TRAIN & TEST FEATURE SPACES
-    # ---------------------------------------------------------
+    # --- Reconstruct Train & Test Feature Spaces -------------------------
     print("    -> Reconstructing and standardizing the exact MIMIC train/test sets...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -89,10 +90,8 @@ def main():
     y_train = y[idx_train]
 
     # Static Features
-    static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    static_cols = ["age", "baseline_sofa"]
     df_static = df_cohort[[c for c in static_cols if c in df_cohort.columns]].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"].astype(str).str.upper() == "M").astype(int)
     X_static = df_static.fillna(0).values
 
     # Temporal Aggregations
@@ -110,9 +109,7 @@ def main():
     
     df_test_features = pd.DataFrame(X_test_scaled, columns=feature_names)
 
-    # ---------------------------------------------------------
-    # 3. 50-MODEL CONSENSUS SHAP LOOP
-    # ---------------------------------------------------------
+    # --- 50-model Consensus Shap Loop ------------------------------------
     print(f"    -> Training {N_MODELS} independent XGBoost models for Consensus SHAP...")
     
     test_size = len(X_test_scaled)
@@ -140,9 +137,7 @@ def main():
         
         all_shap_values[i] = shap_values
 
-    # ---------------------------------------------------------
-    # 4. AGGREGATE & EXPORT
-    # ---------------------------------------------------------
+    # --- Aggregate & Export ----------------------------------------------
     print("    -> Aggregating Consensus metrics and exporting...")
     
     # 1. Consensus Exact SHAP (Mean of all 50 runs for patient-level beeswarm plots)
@@ -171,9 +166,7 @@ def main():
     with open(OUT_FEATS / "mimic_top_20_consensus_features.json", "w") as f:
         json.dump(df_consensus.head(20).to_dict(orient="records"), f, indent=4)
 
-    # ---------------------------------------------------------
-    # 5. CONSOLE REPORT
-    # ---------------------------------------------------------
+    # --- Console Report --------------------------------------------------
     print("\n=========================================================================")
     print(f" TOP 10 CLINICAL DRIVERS OF SEPSIS MORTALITY ({N_MODELS}-MODEL CONSENSUS SHAP)")
     print("=========================================================================")

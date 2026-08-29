@@ -1,37 +1,35 @@
 """
-04b_mimic_physiological_bounds.py
+Void physiologically impossible values in the extracted time series.
 
-Applies strict clinical physiological limits to the raw temporal extraction.
-Converts biologically impossible outliers (e.g., MAP = 80,000) into nulls 
-so they can be appropriately handled by the downstream SAITS imputation model.
+Applies a per-item plausible range and sets anything outside it to NULL rather
+than dropping the row or clipping to the boundary. Clipping would invent a value
+at the limit; NULL lets the downstream SAITS model reconstruct it from the
+patient's own trajectory, which is the intended treatment for charting artefacts
+such as a mean arterial pressure of 80,000.
 
-Features included:
-- Reverted synthetic Vasopressor bounds, restoring raw limits for Norepi, Epi, 
-  Dopa, Dobutamine, Vasopressin, and Phenylephrine to support downstream mapping.
-- Generous but safe physiological limits (0 - 5000 mL) applied for all Urine Output 
-  pathways to eliminate charting artifacts.
+Runs on the Polars lazy engine and reports how many values were voided.
+
+Reads:
+    mimic_sepsis_temporal_data.parquet
+Writes:
+    mimic_sepsis_temporal_data_cleaned.parquet
 """
 
 import time
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("Executing MIMIC-IV physiological bounding pipeline...")
     start_time = time.time()
     
     # Read explicitly named file from Script 04a
     in_file = PROCESSED_DIR / "mimic_sepsis_temporal_data.parquet"
-    # Write explicitly named output file
     out_file = PROCESSED_DIR / "mimic_sepsis_temporal_data_cleaned.parquet"
     
     if not in_file.exists():
@@ -62,22 +60,17 @@ def main():
         50821: (20, 800),       # PaO2
         50818: (10, 200),       # PaCO2
         50820: (6.5, 8.0),      # pH
-        50813: (0, 50),         # Lactate (Blood Gas)
-        227442: (0, 50),        # Lactate (Charted)
+        50813: (0, 50),         # Lactate
         50912: (0, 40),         # Creatinine
-        220615: (0, 40),        # Creatinine (Charted)
         51006: (0, 300),        # BUN
         50885: (0, 80),         # tBil
-        225664: (0, 80),        # tBil (Charted)
         51301: (0, 300),        # WBC
         51300: (0, 300),        # WBC
         51265: (0, 2500),       # Platelets
-        227457: (0, 2500),      # Platelets (Charted)
         51222: (0, 30),         # Hemoglobin
         51274: (0, 200),        # PT
         51275: (0, 300),        # APTT
         50862: (0, 15),         # Albumin
-        220862: (0, 15),        # Albumin (Charted)
         50971: (0, 15),         # Potassium
         50822: (0, 15),         # Potassium (Blood Gas)
         50983: (90, 200),       # Sodium
@@ -144,7 +137,6 @@ def main():
                 .drop(["valuenum", "bound_min", "bound_max"])
                 .rename({"valuenum_cleaned": "valuenum"}))
     
-    # Save the cleaned dataset
     df_final.write_parquet(out_file)
 
     elapsed = time.time() - start_time

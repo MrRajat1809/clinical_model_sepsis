@@ -1,14 +1,31 @@
 """
-04_wong_clinical_utility_audits.py
+Alert burden and intervention timing, after Wong et al.
 
-Executes clinical utility and temporal context audits inspired by Wong et al. 
+Two audits of what deployment would actually look like, on the MIMIC-IV held-out
+test set.
 
-Interpretation note:
-Audit B is a descriptive temporal-context analysis. It measures whether
-the model's fixed 24-hour prediction horizon precedes the first recorded
-post-onset vasopressor administration. It does NOT establish that the
-model predicted vasopressor need, caused earlier intervention, or provided
-clinical benefit.
+Audit A, alert burden. At the prespecified 0.225 threshold, reports the number
+needed to evaluate (the reciprocal of positive predictive value) alongside
+sensitivity, specificity and alert rate, then sweeps the threshold from 0.05 to
+0.95 to show how burden trades against sensitivity. A model with good
+discrimination can still be unusable if every true positive costs ten reviews.
+
+Audit B, intervention timing. Among true-positive alerts, classifies the first
+recorded vasopressor into mutually exclusive groups relative to sepsis onset:
+before onset, within 24 hours, after 24 hours, or never recorded. For the
+after-24-hours group it reports how far the administration fell beyond the
+prediction horizon.
+
+Audit B is descriptive context only. It does not establish that the model
+predicted the need for treatment, that it would have changed care, or that it
+confers benefit. Anything stronger requires a prospective design.
+
+Reads:
+    outputs/predictions/mimic_champion_predictions.csv
+    mimic_final_sepsis3_cohort.parquet, mimic_sepsis_temporal_data_cleaned.parquet
+Writes:
+    outputs/analysis/wong_audit_{a_thresholds.csv, b_report.csv,
+                                 b_patient_timing.parquet} and a dashboard figure
 """
 
 import time
@@ -23,9 +40,7 @@ from sklearn.metrics import confusion_matrix
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PREDS_FILE = BASE_DIR / "outputs" / "predictions" / "mimic_champion_predictions.csv"
@@ -48,9 +63,7 @@ def main():
     print("[*] Initiating Wong et al. Clinical Utility Audits...")
     start_time = time.time()
 
-    # ---------------------------------------------------------
-    # 1. LOAD PREDICTIONS
-    # ---------------------------------------------------------
+    # --- Load Predictions ------------------------------------------------
     if not PREDS_FILE.exists():
         print(f"[ERROR] Predictions file missing: {PREDS_FILE}")
         return
@@ -62,9 +75,7 @@ def main():
     y_true = df_preds[label_col].values
     y_prob = df_preds[prob_col].values
 
-    # ---------------------------------------------------------
-    # AUDIT A: ALERT BURDEN & NNE
-    # ---------------------------------------------------------
+    # --- Audit A: Alert Burden & Nne -------------------------------------
     print("\n[AUDIT A]: Alert Burden and Number Needed to Evaluate (NNE)")
     
     # Exact prespecified threshold
@@ -103,9 +114,7 @@ def main():
     df_audit_a = pd.DataFrame(audit_a_results)
     df_audit_a.to_csv(AUDIT_A_REPORT, index=False)
 
-    # ---------------------------------------------------------
-    # AUDIT B: USUAL CARE / INTERVENTION TIMING
-    # ---------------------------------------------------------
+    # --- Audit B: Usual Care / Intervention Timing -----------------------
     print("\n[AUDIT B]: Clinical Intervention Timing (Contextual)")
     print("    -> Measuring absolute first recorded vasopressor relative to sepsis onset...")
 
@@ -169,7 +178,7 @@ def main():
     n_after24 = int(after_24h.sum())
     n_no_post = int(no_pressor.sum())
     
-    # [FIX] Define the denominator for the plotting legend
+    # Define the denominator for the plotting legend
     n_with_post = n_within24 + n_after24
 
     print(f"\n    - Alert threshold                     : {TARGET_THRESHOLD:.3f}")
@@ -207,9 +216,7 @@ def main():
     pd.DataFrame([audit_b_results]).to_csv(AUDIT_B_REPORT, index=False)
     df_tp_timing.to_parquet(AUDIT_B_PATIENTS, index=False)
 
-    # ---------------------------------------------------------
-    # VISUALIZATION
-    # ---------------------------------------------------------
+    # --- Visualization ---------------------------------------------------
     print("\n    -> Generating Wong Audit Visualization Dashboard...")
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
     fig.patch.set_facecolor('white')

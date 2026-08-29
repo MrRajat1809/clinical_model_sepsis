@@ -1,13 +1,27 @@
 """
-07a_eicu_tensor_builder.py
+Reshape the eICU time series into the modelling tensor.
 
-Reshapes the cleaned eICU temporal extractions into a dense 3D tensor [Patients, 24 Steps, Features].
+eICU counterpart of the MIMIC-IV tensor builder, producing an identically shaped
+[patients, 24, 30] array over the first 24 h after sepsis onset. Feature order,
+hourly aggregation rules and the engineered PaO2/FiO2 and norepinephrine
+equivalent are all taken from the MIMIC-IV definitions, because the locked model
+indexes features by position: a mismatch here would silently feed the wrong
+column to the wrong tree.
 
-Features included:
-- Integrates standalone GCS, FiO2, and Audited Vasopressor timelines.
-- Corrects the NEQ calculation (Phenylephrine / 2.2) to match MIMIC-IV pharmacology.
-- Forces the exact 30-feature temporal order and 8-feature static order from MIMIC-IV 
-  to ensure flawless downstream compatibility.
+The four eICU streams (base vitals and labs, GCS, FiO2, standardised pressors)
+are stacked before binning, since they were extracted separately.
+
+The static block is built to the same eight-column layout as MIMIC-IV. Admission
+type has no eICU equivalent and is filled with a constant placeholder; it is not
+one of the four static variables the model consumes.
+
+Reads:
+    eicu_final_sepsis3_cohort.parquet, eicu_sepsis_temporal_data_cleaned.parquet
+    eicu_gcs_timeline.parquet, eicu_fio2_timeline.parquet,
+    eicu_standardized_pressors.parquet
+Writes:
+    eicu_sepsis_tensor_raw.npy and the parallel stay id, feature name, mask,
+    static, static feature name, label and aggregation policy arrays
 """
 
 import time
@@ -16,9 +30,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
@@ -36,7 +48,6 @@ def main():
     fio2_file = PROCESSED_DIR / "eicu_fio2_timeline.parquet"
     pressor_file = PROCESSED_DIR / "eicu_standardized_pressors.parquet"
     
-    # Outputs routed directly to flattened processed directory
     out_tensor = PROCESSED_DIR / "eicu_sepsis_tensor_raw.npy"
     id_file = PROCESSED_DIR / "eicu_sepsis_tensor_stay_ids.npy"
     feature_file = PROCESSED_DIR / "eicu_sepsis_tensor_features.npy"
@@ -51,9 +62,7 @@ def main():
         print(f"[ERROR] Cleaned temporal data not found at {temporal_file}")
         return
 
-    # ---------------------------------------------------------
-    # 1. LOAD DATA & CONCATENATE TIMELINES
-    # ---------------------------------------------------------
+    # --- Load Data & Concatenate Timelines -------------------------------
     print("    -> Loading cohort and stacking temporal data streams...")
     
     try:
@@ -90,9 +99,7 @@ def main():
     # Master Temporal Dataframe
     df_all_temporal = pl.concat([df_vitals, df_gcs, df_fio2, df_pressors])
 
-    # ---------------------------------------------------------
-    # 2. FEATURE MAPPING
-    # ---------------------------------------------------------
+    # --- Feature Mapping -------------------------------------------------
     feature_map = {
         "heartrate": "hr", "systemicmean": "map", "noninvasivemean": "map", 
         "respiration": "rr", "temperature": "temp_c", "sao2": "spo2",
@@ -114,9 +121,7 @@ def main():
         "feature": list(feature_map.values())
     }, schema={"itemid": pl.Utf8, "feature": pl.Utf8})
 
-    # ---------------------------------------------------------
-    # 3. TEMPORAL BINNING (24 UNIFORM 1-HOUR BINS)
-    # ---------------------------------------------------------
+    # --- Temporal Binning (24 Uniform 1-hour Bins) -----------------------
     print("    -> Filtering temporal window and enforcing 24x 1-hour bins...")
     df_joined = df_all_temporal.lazy().join(df_cohort.lazy().select(["stay_id", "sepsis_onset_offset"]), on="stay_id")
     df_joined = df_joined.join(mapping_df.lazy(), on="itemid", how="inner")
@@ -131,9 +136,7 @@ def main():
         pl.col("hours_from_onset").floor().cast(pl.Int32).alias("time_step")
     ).collect()
 
-    # ---------------------------------------------------------
-    # 4. CLINICAL AGGREGATION
-    # ---------------------------------------------------------
+    # --- Clinical Aggregation --------------------------------------------
     print("    -> Applying physiological aggregation logic (Mean/Max/Min/Sum) per bin...")
     
     mean_vars = ["temp_c", "sodium", "potassium", "chloride"]
@@ -163,9 +166,7 @@ def main():
         values="val", index=["stay_id", "time_step"], on="feature", aggregate_function="first"
     ).to_pandas()
 
-    # ---------------------------------------------------------
-    # 5. FEATURE ENGINEERING (P/F RATIO & NEQ)
-    # ---------------------------------------------------------
+    # --- Feature Engineering (p/f Ratio & Neq) ---------------------------
     print("    -> Engineering PaO2/FiO2 ratio and validated NEQ conversion...")
     
     if "fio2" in df_wide.columns and "pao2" in df_wide.columns:
@@ -204,9 +205,7 @@ def main():
         if f not in df_wide.columns:
             df_wide[f] = np.nan
 
-    # ---------------------------------------------------------
-    # 6. TENSOR RESHAPING
-    # ---------------------------------------------------------
+    # --- Tensor Reshaping ------------------------------------------------
     print("    -> Reshaping data into dense 3D Tensor format...")
     stay_ids = sorted(df_cohort["stay_id"].to_list())
 
@@ -220,9 +219,7 @@ def main():
     print(f"       - 3D Temporal Shape : {X_3d.shape} [Patients, Steps, Features]")
     print(f"       - Missingness Rate  : {missingness_mask.mean() * 100:.2f}%")
 
-    # ---------------------------------------------------------
-    # 7. STATIC & LABEL EXTRACTION
-    # ---------------------------------------------------------
+    # --- Static & Label Extraction ---------------------------------------
     print("    -> Extracting parallel 2D Static Context and 1D Labels...")
     df_static = df_cohort.to_pandas().set_index("stay_id").reindex(stay_ids)
     
@@ -241,9 +238,7 @@ def main():
     print(f"       - 2D Static Shape   : {X_static.shape}")
     print(f"       - 1D Target Shape   : {y_labels.shape}")
 
-    # ---------------------------------------------------------
-    # 8. SERIALIZATION
-    # ---------------------------------------------------------
+    # --- Serialization ---------------------------------------------------
     np.save(out_tensor, X_3d)
     np.save(id_file, np.array(stay_ids))
     np.save(feature_file, np.array(FEATURE_ORDER))

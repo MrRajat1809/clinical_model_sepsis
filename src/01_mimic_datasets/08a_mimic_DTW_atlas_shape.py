@@ -1,18 +1,22 @@
 """
-08a_mimic_DTW_atlas_shape.py
+Pairwise DTW distance matrix over trajectory shape.
 
-Computes the pairwise Dynamic Time Warping (DTW) distance matrix for the fully imputed 
-3D time-series tensor to map the patient trajectory manifold.
+First half of the shape manifold. Each patient trajectory is mean-variance
+normalised along its own time axis before the distance is computed, which
+removes absolute magnitude and leaves the morphology of physiological change.
+Two patients who deteriorate in the same pattern are close even if one is far
+sicker throughout. The severity counterpart in 09a keeps magnitude instead.
 
-Features included:
-- Uses TimeSeriesScalerMeanVariance(). Scaling each patient independently forces 
-  the DTW algorithm to evaluate trajectories based on the *morphology* (shape) 
-  of their physiological changes rather than absolute severity.
-- Replaced discrete K-Means clustering with pairwise distance matrix computation 
-  (cdist_dtw) to feed manifold learning algorithms (e.g., PHATE).
-- Implemented smart upper-triangular batching wrapped in a tqdm progress bar 
-  to track the O(N^2) computation without losing tslearn's self-similarity optimization.
-- Filenames explicitly designated with `_shape_` to prevent clashes with the Severity manifold.
+Cost: dynamic time warping is O(N^2) in patients. The matrix is computed in
+blocks over the upper triangle and mirrored, which halves the work, but this is
+still the slowest script in the project. It is excluded from run_pipeline.sh and
+lives in run_dtw_phate_atlas.sh.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, mimic_sepsis_tensor_stay_ids.npy
+Writes:
+    outputs/features/mimic_dtw_shape_pairwise_distance_matrix.npy
+    outputs/features/mimic_shape_atlas_stay_ids.npy
 """
 
 import time
@@ -26,15 +30,11 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Data Inputs
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_FEATS = BASE_DIR / "outputs" / "features"
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 

@@ -1,9 +1,25 @@
 """
-08_clinical_rfecv.py
+Feature-selection stability over 100 RFECV repetitions.
 
-Phase 7: 100-Iteration Recursive Feature Elimination (RFECV)
-Identifies the optimal, minimal subset of physiological features required 
-to predict sepsis mortality using a 100-iteration stability analysis.
+A single recursive elimination run is unstable: correlated features trade places
+between folds. Repeating it 100 times with a different cross-validation seed each
+round turns selection into a frequency, and a feature retained in nearly every
+repetition is genuinely load-bearing rather than a fold artefact.
+
+Each repetition eliminates one feature at a time under five-fold stratified
+cross-validation, scored by AUROC from predicted probabilities, with a floor of
+ten retained features. The estimator uses a fixed cost-sensitive configuration
+rather than the tuned one, so the ranking is not shaped by hyperparameters
+selected on this same data.
+
+Features retained in at least 80 percent of repetitions define the reduced
+representation used by the pruned model.
+
+Reads:
+    mimic_sepsis_imputed_tensor.npy, outputs/features/mimic_champion_features.json
+Writes:
+    outputs/features/mimic_stable_optimal_features.json
+    outputs/metrics/mimic_rfecv_100_iteration_stability.csv, and a plot
 """
 
 import time
@@ -26,12 +42,9 @@ from sklearn.metrics import roc_auc_score
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Input Tensors & Cohort (MIMIC Training Set only)
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
 # Flattened Global Outputs structure
@@ -43,15 +56,13 @@ OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 for d in [OUT_MODELS, OUT_FEATS, OUT_METRICS, OUT_FIGURES]:
     d.mkdir(parents=True, exist_ok=True)
 
-# [FIX]: Synchronized to the new explicit prefix 
+# Synchronized to the new explicit prefix
 FEAT_NAMES_FILE = OUT_FEATS / "mimic_champion_features.json"
 
 BASE_RANDOM_STATE = 42
 N_ITERATIONS = 100
 
-# ==========================================
-# CUSTOM SCORER TO BYPASS API CLASH
-# ==========================================
+# --- Custom Scorer to Bypass Api Clash -----------------------------------
 def custom_auc_scorer(estimator, X, y):
     """
     Forces the calculation of AUROC using predict_proba.
@@ -60,16 +71,12 @@ def custom_auc_scorer(estimator, X, y):
     y_pred_proba = estimator.predict_proba(X)[:, 1]
     return roc_auc_score(y, y_pred_proba)
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print(f"[*] Initiating Phase 9: {N_ITERATIONS}-Iteration Clinical RFECV...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD AND RECONSTRUCT TRAINING DATA
-    # ---------------------------------------------------------
+    # --- Load and Reconstruct Training Data ------------------------------
     print("    -> Reconstructing the MIMIC-IV training feature space...")
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
@@ -91,10 +98,8 @@ def main():
         return
 
     # Flatten the 3D tensor
-    static_cols = ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"]
+    static_cols = ["age", "baseline_sofa"]
     df_static = df_cohort[[c for c in static_cols if c in df_cohort.columns]].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"].astype(str).str.upper() == "M").astype(int)
     X_static = df_static.fillna(0).values
 
     X_mean = np.mean(X_imputed, axis=1)
@@ -108,18 +113,14 @@ def main():
     X_train_raw = X_fused[idx_train]
     X_train_scaled = StandardScaler().fit_transform(X_train_raw)
 
-    # ---------------------------------------------------------
-    # 2. CONFIGURE COST-SENSITIVE XGBOOST
-    # ---------------------------------------------------------
+    # --- Configure Cost-sensitive Xgboost --------------------------------
     n_survivors = np.sum(y_train == 0)
     n_nonsurvivors = np.sum(y_train == 1)
     scale_pos_weight = n_survivors / n_nonsurvivors
     
     print(f"    -> Class Weights (Survivors: {n_survivors}, Non-Survivors: {n_nonsurvivors})")
     
-    # ---------------------------------------------------------
-    # 3. RUN 100-ITERATION RECURSIVE FEATURE ELIMINATION
-    # ---------------------------------------------------------
+    # --- Run 100-iteration Recursive Feature Elimination -----------------
     print(f"    -> Beginning {N_ITERATIONS}-iteration stability analysis...")
     print("       (Note: Bypassing scikit-learn API bugs with custom scorer)")
     
@@ -157,9 +158,7 @@ def main():
         del rfecv, cv, xgb_estimator
         gc.collect()
 
-    # ---------------------------------------------------------
-    # 4. EXTRACT & EXPORT STABILITY RESULTS
-    # ---------------------------------------------------------
+    # --- Extract & Export Stability Results ------------------------------
     selection_frequencies = (feature_selection_counts / N_ITERATIONS) * 100
     
     df_stability = pd.DataFrame({
@@ -167,7 +166,7 @@ def main():
         "Selection_Frequency_Pct": selection_frequencies
     }).sort_values(by="Selection_Frequency_Pct", ascending=False).reset_index(drop=True)
     
-    # [FIX]: Use Explicit mimic_ prefixes for generated files
+    # Use Explicit mimic_ prefixes for generated files
     df_stability.to_csv(OUT_METRICS / "mimic_rfecv_100_iteration_stability.csv", index=False)
     
     # Isolate highly stable features (e.g., >80% retention)
@@ -176,9 +175,7 @@ def main():
     with open(OUT_FEATS / "mimic_stable_optimal_features.json", "w") as f:
         json.dump(stable_features, f, indent=4)
 
-    # ---------------------------------------------------------
-    # 5. GENERATE SELECTION FREQUENCY PLOT
-    # ---------------------------------------------------------
+    # --- Generate Selection Frequency Plot -------------------------------
     print("\n    -> Generating RFECV Stability Plot...")
     sns.set_theme(style="whitegrid")
     

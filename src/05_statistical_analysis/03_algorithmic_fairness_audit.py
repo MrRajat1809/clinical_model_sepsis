@@ -1,9 +1,24 @@
 """
-03_algorithmic_fairness_audit.py
+Subgroup discrimination by sex and age across all three cohorts.
 
-Evaluates algorithmic fairness across demographic subgroups (Gender and Age).
-Utilizes 1000 bootstrap iterations to generate 95% Confidence Intervals.
-Runs across MIMIC (Internal), eICU (External), and Atlas (Global) datasets.
+Checks that aggregate performance is not concealing a subgroup where the model
+performs materially worse. Runs on MIMIC-IV internally, eICU externally, and the
+two pooled, since a disparity that appears only after transport is a different
+finding from one present at development.
+
+Subgroups are male against female, and under 60 against 60 and over. Each
+subgroup AUROC is bootstrapped independently over 1000 resamples, so the
+intervals reflect that subgroup's own size; a small subgroup should show a wide
+interval rather than a falsely precise estimate.
+
+The absolute difference between paired subgroup AUROCs is compared against a
+prespecified margin of 0.02.
+
+Reads:
+    MIMIC-IV and eICU champion predictions, and both cohort tables for
+    demographics
+Writes:
+    outputs/analysis/algorithmic_fairness_report.csv
 """
 
 import time

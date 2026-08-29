@@ -1,38 +1,51 @@
 """
-05_eicu_sofa_calculator.py
+Apply the Sepsis-3 criteria to eICU and fix the sepsis onset time.
 
-Calculates the dynamic 6-organ SOFA score to identify an acute increase of >= 2 points.
-Establishes the final eICU Sepsis-3 external validation cohort and re-evaluates 
-Sepsis Onset Time as the intersection of suspected infection and organ failure.
+eICU counterpart of the MIMIC-IV SOFA calculator, using the same windows,
+thresholds and delta >= 2 rule so cohort membership is decided identically in
+both databases.
 
-Features included:
-- Baseline Window: -48 hours up to Suspected Infection Time (SIT)
-- Acute Window: SIT up to +24 hours
-- Converts eICU minute offsets into hours for accurate windowing.
-- Integrates high-fidelity standalone streams (GCS, FiO2, Pressors) seamlessly with base vitals.
-- Missing baseline SOFA scores (when lab/vital data is entirely absent) are imputed as 0 (normal).
+The one structural difference is assembly: eICU's SOFA inputs arrive from four
+separate sources rather than one table, so the base vitals, the GCS timeline,
+the FiO2 timeline and the standardised pressors are concatenated into a single
+timeline before scoring. Offsets are in minutes and converted to hours for
+windowing.
+
+    baseline   -48 h up to, but not including, SIT
+    acute      SIT (inclusive) to +24 h
+
+GCS thresholds for onset detection are component-specific (eye < 4, verbal < 5,
+motor < 6), matching MIMIC-IV.
+
+Missing-data convention:
+    A component with no qualifying observation scores 0, and absent GCS
+    components are filled to normal before the total is formed. Because eICU
+    charts several variables less densely than MIMIC-IV, this convention
+    interacts with recording practice and belongs in the limitations.
+
+Reads:
+    eicu_sepsis_phenotype_cohort.parquet, eicu_sepsis_temporal_data_cleaned.parquet
+    eicu_gcs_timeline.parquet, eicu_fio2_timeline.parquet,
+    eicu_standardized_pressors.parquet
+Writes:
+    eicu_final_sepsis3_cohort.parquet, carrying sepsis_onset_offset,
+    baseline_sofa and baseline_pf_ratio
 """
 
 import time
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Executing eICU dynamic SOFA calculation pipeline...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. FILE DEPENDENCIES
-    # ---------------------------------------------------------
+    # --- File Dependencies -----------------------------------------------
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     temporal_file = PROCESSED_DIR / "eicu_sepsis_temporal_data_cleaned.parquet"
     gcs_file = PROCESSED_DIR / "eicu_gcs_timeline.parquet"
@@ -99,9 +112,7 @@ def main():
     # Join with cohort to get SIT offset
     df_joined = df_unified_timeline.join(df_cohort.lazy().select(["stay_id", "sit_offset"]), on="stay_id")
 
-    # ---------------------------------------------------------
-    # 2. TEMPORAL SEGMENTATION
-    # ---------------------------------------------------------
+    # --- Temporal Segmentation -------------------------------------------
     print("[*] Segmenting temporal data into Baseline (-48h to SIT) and Acute (SIT to +24h) windows...")
     
     # Define dynamic windows relative to SIT using eICU minute offsets converted to hours
@@ -114,9 +125,7 @@ def main():
           .otherwise(pl.lit("acute")).alias("window")
     )
 
-    # ---------------------------------------------------------
-    # 3. AGGREGATION & SOFA LOGIC
-    # ---------------------------------------------------------
+    # --- Aggregation & Sofa Logic ----------------------------------------
     print("[*] Aggregating worst physiological values per window and calculating SOFA scores...")
     
     # Find the worst values for each window
@@ -216,9 +225,7 @@ def main():
          pl.col("sofa_cv") + pl.col("sofa_cns") + pl.col("sofa_renal")).alias("total_sofa")
     )
     
-    # ---------------------------------------------------------
-    # 4. COHORT ADJUDICATION (Delta SOFA)
-    # ---------------------------------------------------------
+    # --- COHORT ADJUDICATION (Delta SOFA) --------------------------------
     df_baseline = df_total_sofa.filter(pl.col("window") == "baseline").select(
         pl.col("stay_id"),
         pl.col("total_sofa").alias("baseline_sofa"),
@@ -246,9 +253,7 @@ def main():
     # Filter for Sepsis-3 Criteria
     sepsis3_stay_ids = df_final_pivot.filter(pl.col("sofa_delta") >= 2).select("stay_id")
     
-    # ---------------------------------------------------------
-    # 5. SEPSIS ONSET TIME DEFINITION
-    # ---------------------------------------------------------
+    # --- Sepsis Onset Time Definition ------------------------------------
     print("[*] Re-evaluating exact Sepsis Onset Time (intersection of infection and deterioration)...")
     
     # Find exact Sepsis Onset Time by scanning for the earliest abnormal SOFA-triggering event in the acute window
@@ -259,7 +264,9 @@ def main():
             ((pl.col("variable") == "bilirubin") & (pl.col("valuenum") >= 1.2)) |
             ((pl.col("variable") == "creatinine") & (pl.col("valuenum") >= 1.2)) |
             ((pl.col("variable").is_in(["norepinephrine", "epinephrine", "dopamine", "dobutamine"])) & (pl.col("valuenum") > 0)) |
-            ((pl.col("variable").is_in(["gcs_motor", "gcs_verbal", "gcs_eye"])) & (pl.col("valuenum") < 6))
+            ((pl.col("variable") == "gcs_eye") & (pl.col("valuenum") < 4)) |
+            ((pl.col("variable") == "gcs_verbal") & (pl.col("valuenum") < 5)) |
+            ((pl.col("variable") == "gcs_motor") & (pl.col("valuenum") < 6))
         )
     ).group_by("stay_id").agg(
         pl.col("event_time").min().alias("sofa_deterioration_offset")

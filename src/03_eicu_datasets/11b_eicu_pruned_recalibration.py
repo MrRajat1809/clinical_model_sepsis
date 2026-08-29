@@ -1,16 +1,19 @@
 """
-11b_eicu_pruned_recalibration.py
+External probability recalibration for the reduced-feature model.
 
-External Recalibration (Pruned Model)
-Corrects the probability outputs of the lightweight 72-feature model on the eICU dataset.
-Because the pruned model shed features and was trained with scale_pos_weight on MIMIC-IV, 
-its raw probabilities are severely miscalibrated for the eICU environment.
+Repeats the 11a procedure on the pruned model's predictions, with the same 80/20
+stratified split, the same two calibrators and the same locked-threshold
+discipline.
 
-Features included:
-- Splits eICU predictions into 80% Calibration / 20% Test.
-- Fits Platt Scaling and Isotonic Regression solely on the 80% Calibration Set.
-- Calculates Optimal Decision Thresholds (Youden's J) strictly on the Calibration Set.
-- Evaluates the final recalibrated performance on the unseen 20% Test Set.
+Worth running separately because the reduced model was trained with class
+weighting on a smaller feature set, so its raw probabilities are miscalibrated
+differently from the full model's, and the correction it needs is not the same
+one.
+
+Reads:
+    outputs/metrics/eicu_pruned_predictions.csv
+Writes:
+    outputs/metrics/eicu_pruned_calibration_metrics.json and a reliability diagram
 """
 
 import warnings
@@ -32,19 +35,15 @@ from scipy.special import logit
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Global Outputs
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
 # Input: Predictions from the pruned model
 PREDS_FILE = OUT_METRICS / "eicu_pruned_predictions.csv"
 
-# Outputs
 OUT_PLOT = OUT_FIGURES / "eicu_pruned_calibration_curve.png"
 METRICS_FILE = OUT_METRICS / "eicu_pruned_calibration_metrics.json"
 

@@ -1,16 +1,20 @@
 """
-04h_eicu_extract_fio2.py
+Extract and standardise inspired oxygen fraction from respiratory charting.
 
-Mines the unstructured `respiratoryCharting` table to extract FiO2 percentages.
-Converts decimal representations (e.g., 0.21) to standard percentages (21-100),
-applies strict physiological bounds, and exports a clean timeline for the tensor builder.
+FiO2 is recorded in respiratoryCharting rather than the tables the main temporal
+slice reads, and is entered inconsistently as either a fraction or a percentage.
+Values between 0.20 and 1.0 are treated as fractions and multiplied by 100, and
+the result is constrained to 21-100 percent, which is the physiologically
+possible range for delivered oxygen.
 
-Features included:
-- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
-  circular dependency.
-- Anchors the extraction window to `sit_offset` and widens it to +/- 48 hours.
-- Enabled Polars streaming engine to prevent OOM crashes during the processing 
-  of the massive respiratoryCharting table.
+Needed for the PaO2/FiO2 ratio that drives the respiratory SOFA component.
+Streamed for the same memory reasons as the GCS extraction.
+
+Reads:
+    eicu_sepsis_phenotype_cohort.parquet
+    data/raw/eicu-crd/2.0/respiratoryCharting
+Writes:
+    eicu_fio2_timeline.parquet
 """
 
 import time
@@ -20,9 +24,7 @@ import itertools
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 RAW_EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
@@ -57,7 +59,7 @@ def extract_fio2():
     start_time = time.time()
     
     charting_file = RAW_EICU_DIR / "respiratoryCharting.csv.gz"
-    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    # Point to the Phenotype cohort to allow execution before script 05
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_file = PROCESSED_DIR / "eicu_fio2_timeline.parquet"
     
@@ -67,7 +69,7 @@ def extract_fio2():
 
     print("    -> Loading Sepsis Phenotype cohort...")
     try:
-        # [FIX]: Load sit_offset instead of sepsis_onset_offset
+        # Load sit_offset instead of sepsis_onset_offset
         df_cohort = pl.read_parquet(cohort_file).select(["stay_id", "sit_offset"])
     except Exception as e:
         print(f"[ERROR] Failed to load cohort file at {cohort_file}. Error: {e}")
@@ -94,7 +96,7 @@ def extract_fio2():
     
     df_joined = df_fio2.join(df_cohort.lazy(), on="stay_id", how="inner")
     
-    # [FIX]: Calculate temporal window based on SIT and expand to +/- 48 hours
+    # Calculate temporal window based on SIT and expand to +/- 48 hours
     df_window = df_joined.with_columns(
         ((pl.col("event_time") - pl.col("sit_offset")) / 60.0).alias("hours_from_sit"),
         pl.col("chart_value").cast(pl.Float64, strict=False).alias("raw_valuenum")

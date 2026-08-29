@@ -13,3 +13,6 @@ __pycache__/
 venv/
 env/
 .env
+logs/
+outputs/RESULTS_DIGEST.md
+sepsis_pipeline_handoff.zip

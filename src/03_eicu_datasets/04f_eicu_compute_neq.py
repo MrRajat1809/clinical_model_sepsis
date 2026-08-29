@@ -1,20 +1,25 @@
 """
-04f_eicu_compute_neq.py
+Compute norepinephrine-equivalent dose and check it against MIMIC-IV.
 
-Calculates the Norepinephrine Equivalent Dose (NEQ).
+Third of the three pressor steps. Applies the Brown et al. (2013) conversion
+factors to the standardised rates, keeping each drug's contribution separately
+before summing so the composition of a dose can be inspected. Dobutamine is
+excluded from the equivalent, correctly: it is an inotrope, not a vasopressor.
 
-Features included:
-- Strictly implements the exact pharmacological conversion factors defined in 
-  Brown et al. (2013). Phenylephrine is converted at a 1:2.2 ratio (multiplier ~0.4545).
-- Temporarily bins eICU minute-level readings into 1-hour Maximums using the 
-  "Sum of Maxes" logic (matching 07a Tensor Builder) to ensure an apples-to-apples 
-  validation comparison against the MIMIC-IV 3D Tensor.
-- [FIXED]: Compares against the RAW MIMIC tensor (ignoring NaNs) rather than the 
-  SAITS-imputed tensor to ensure we are comparing Human Charting vs Human Charting.
-- [FIXED]: Filters eICU data to the exact 0-24 hour acute window (0-1440 mins) to match 
-  MIMIC's tensor scope, removing low-dose maintenance tails that artificially deflate the median.
-- Preserves individual drug contributions (neq_from_ne, neq_from_epi, etc.) prior to summation.
-- Exports a feature equivalence report to audit potential covariate shift.
+The second half is a feature-equivalence check. eICU records infusions at minute
+resolution while the MIMIC-IV tensor holds hourly values, so a naive comparison
+of the two distributions would differ purely because of binning. eICU is
+therefore binned to hourly sum-of-maxima, matching the tensor builder, and
+restricted to the same 0-24 h window, before the medians are compared. The
+comparison uses the raw rather than imputed MIMIC-IV tensor, so it contrasts
+charted values with charted values.
+
+Reads:
+    eicu_standardized_pressors.parquet
+    mimic_sepsis_tensor_raw.npy and its feature names
+Writes:
+    eicu_neq_timeline.parquet
+    outputs/metrics/eicu_feature_equivalence_report_NEQ.json and a density plot
 """
 
 import time
@@ -29,14 +34,11 @@ import seaborn as sns
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR_EICU = BASE_DIR / "data" / "processed" / "eicu"
 PROCESSED_DIR_MIMIC = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Flattened Global Outputs
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
@@ -65,9 +67,7 @@ def compute_neq_and_validate():
         print(f"[ERROR] Standardized pressors not found at: {in_file}")
         return
 
-    # ---------------------------------------------------------
-    # 1. COMPUTE INDIVIDUAL CONTRIBUTIONS & TOTAL NEQ
-    # ---------------------------------------------------------
+    # --- Compute Individual Contributions & Total Neq --------------------
     print("    -> Applying pure Brown et al. NEQ conversion factors...")
     df_pressors = pl.read_parquet(in_file)
 
@@ -106,9 +106,7 @@ def compute_neq_and_validate():
         "vasopressin": "neq_from_vaso"
     }).sort(["stay_id", "event_time"])
 
-    # ---------------------------------------------------------
-    # 2. EXTENDED CLINICAL DESCRIPTIVE STATISTICS
-    # ---------------------------------------------------------
+    # --- Extended Clinical Descriptive Statistics ------------------------
     print("\n    [eICU NEQ DESCRIPTIVE STATISTICS (Reading-wise)]")
     total_patients = df_final.select(pl.col("stay_id").n_unique()).item()
     max_concurrent = df_final.select(pl.col("concurrent_pressors").max()).item()
@@ -126,9 +124,7 @@ def compute_neq_and_validate():
     print(f"        - Max Concurrent Pressors         : {max_concurrent} (Mean: {mean_concurrent:.2f})")
     print(f"        - Absolute Max NEQ Recorded       : {dist_treated[3]} mcg/kg/min")
 
-    # ---------------------------------------------------------
-    # 3. MIMIC-IV DISTRIBUTION COMPARISON (Apples-to-Apples)
-    # ---------------------------------------------------------
+    # --- MIMIC-IV DISTRIBUTION COMPARISON (Apples-to-Apples) -------------
     print("\n    -> Extracting MIMIC-IV NEQ distribution for equivalence testing...")
     # Load the RAW tensor to avoid SAITS imputed smoothing data
     mimic_tensor_file = PROCESSED_DIR_MIMIC / "mimic_sepsis_tensor_raw.npy"
@@ -144,7 +140,7 @@ def compute_neq_and_validate():
             # Filter out NaNs to only evaluate true charted events
             mimic_neq_active = mimic_neq_raw[~np.isnan(mimic_neq_raw) & (mimic_neq_raw > 0)]
             
-            # [FIX] Filter to Acute 24h Window (0 to 1440 mins) to match MIMIC Tensor
+            # Filter to Acute 24h Window (0 to 1440 mins) to match MIMIC Tensor
             print("    -> Filtering eICU to 24h acute window & Binning into hourly Sum of Maxes...")
             df_eicu_hourly = df_final.filter(
                 (pl.col("event_time") >= 0) & (pl.col("event_time") < 1440)
@@ -188,9 +184,7 @@ def compute_neq_and_validate():
     else:
         print("        - MIMIC tensor files not found. Skipping comparison.")
 
-    # ---------------------------------------------------------
-    # 4. FEATURE EQUIVALENCE REPORT (JSON)
-    # ---------------------------------------------------------
+    # --- Feature Equivalence Report (json) -------------------------------
     report = {
         "Feature": "NEQ (Norepinephrine Equivalent Dose)",
         "Extraction_Methodology": "Strict word-boundary Regex",

@@ -1,13 +1,16 @@
 """
-04b_eicu_physiological_bounds.py
+Void physiologically impossible values in the eICU time series.
 
-Applies strict clinical physiological limits to the raw eICU temporal extraction.
-Converts biologically impossible outliers (e.g., MAP = 80,000) into nulls 
-so they can be appropriately handled by the downstream imputation model.
+Same intent as the MIMIC-IV bounding step: out-of-range values become NULL for
+the imputation model to reconstruct, rather than being clipped to a boundary or
+dropped. The bounds table is keyed by eICU's string identifiers rather than
+numeric item identifiers, but the limits themselves match the MIMIC-IV ones so
+that neither cohort is filtered more aggressively than the other.
 
-Features included:
-- Adapted the mapping dictionary from MIMIC-IV's numeric itemids to 
-  eICU's standardized string identifiers to cleanly apply limits.
+Reads:
+    eicu_sepsis_temporal_data.parquet
+Writes:
+    eicu_sepsis_temporal_data_cleaned.parquet
 """
 
 import time
@@ -15,15 +18,11 @@ from pathlib import Path
 
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     print("[*] Executing eICU physiological bounding pipeline...")
     start_time = time.time()
@@ -72,7 +71,7 @@ def main():
         'chloride': (50, 160),
         
         # Interventions
-        'vasopressor': (0, 10000), # Generous bound due to varied eICU rate units
+        # Vasopressors are bounded in 04e, after unit conversion, not here.
         'urine_output': (0, 5000),
         '888888': (0, 2)           # Unified Mechanical Ventilation (Binary)
     }
@@ -116,7 +115,6 @@ def main():
                 .drop(["valuenum", "bound_min", "bound_max"])
                 .rename({"valuenum_cleaned": "valuenum"}))
     
-    # Save the cleaned dataset
     df_final.write_parquet(out_file)
 
     elapsed = time.time() - start_time

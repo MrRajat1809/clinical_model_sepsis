@@ -1,11 +1,23 @@
 """
-02_clinical_scores.py
+Clinical reference models: SOFA alone, and age plus SOFA.
 
-Phase 1: Establish Baselines
-Establishes the absolute clinical baseline for mortality prediction.
-Evaluates standard clinical markers (SOFA alone, Age + SOFA) using Logistic Regression.
-Ensures evaluation on the exact same test patient indices as all other models.
-Exports predictions, coefficients, curve coordinates, and comprehensive metadata.
+Establishes the floor the machine-learning models have to clear. Both are
+logistic regressions fitted on the development partition and scored on the same
+held-out test patients as every other model, so the comparison is like for like.
+
+The cohort table is reordered onto the tensor stay id sequence before the split
+indices are applied, because those indices address tensor order rather than the
+order the cohort parquet happens to be written in.
+
+Odds ratios and coefficients are exported alongside the metrics, since a linear
+model on two variables is worth reporting in full.
+
+Reads:
+    mimic_final_sepsis3_cohort.parquet
+    outputs/models/mimic_test_set_indices.npy
+Writes:
+    outputs/metrics/mimic_clinical_baseline_metrics.json
+    per-patient predictions and ROC/PR curve coordinates
 """
 
 import time
@@ -25,14 +37,11 @@ from sklearn.preprocessing import StandardScaler
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 COHORT_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 
-# Reframed output directories for strict artifact taxonomy
 METRICS_OUT_DIR = BASE_DIR / "outputs" / "metrics"
 PRED_OUT_DIR = BASE_DIR / "outputs" / "predictions"
 PLOT_DATA_OUT_DIR = BASE_DIR / "outputs" / "plot_data"
@@ -57,11 +66,13 @@ def main():
     MODELS_OUT_DIR.mkdir(parents=True, exist_ok=True)
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD COHORT & TEST INDICES
-    # ---------------------------------------------------------
+    # --- Load Cohort & Test Indices --------------------------------------
     print("    -> Loading cohort metadata and synchronizing test indices...")
+    # Load the sorted stay_ids from the tensor to ensure exact alignment
+    tensor_stay_ids = np.load(COHORT_DIR / "mimic_sepsis_tensor_stay_ids.npy")
     df_cohort = pl.read_parquet(COHORT_DIR / "mimic_final_sepsis3_cohort.parquet").to_pandas()
+    # Force df_cohort to perfectly match the tensor sorting order
+    df_cohort = pd.DataFrame({"stay_id": tensor_stay_ids}).merge(df_cohort, on="stay_id", how="left")
     y = df_cohort["hospital_expire_flag"].values
     stay_ids = df_cohort["stay_id"].values
     
@@ -79,9 +90,7 @@ def main():
     y_test = y[idx_test]
     stay_ids_test = stay_ids[idx_test]
 
-    # ---------------------------------------------------------
-    # 2. EXTRACT FEATURES
-    # ---------------------------------------------------------
+    # --- Extract Features ------------------------------------------------
     sofa_raw = df_cohort[["baseline_sofa"]].fillna(0).values
     age_sofa_raw = df_cohort[["age", "baseline_sofa"]].fillna(0).values
     
@@ -94,9 +103,7 @@ def main():
     age_sofa_train = scaler_age_sofa.fit_transform(age_sofa_raw[idx_train_val])
     age_sofa_test = scaler_age_sofa.transform(age_sofa_raw[idx_test])
     
-    # ---------------------------------------------------------
-    # 3. TRAIN & EVALUATE SOFA ONLY
-    # ---------------------------------------------------------
+    # --- Train & Evaluate Sofa Only --------------------------------------
     print("    -> Evaluating Baseline 1: SOFA Score Only...")
     lr_sofa = LogisticRegression(class_weight="balanced", random_state=RANDOM_STATE)
     lr_sofa.fit(sofa_train, y_train)
@@ -110,9 +117,7 @@ def main():
     sofa_coef = lr_sofa.coef_[0][0]
     sofa_intercept = lr_sofa.intercept_[0]
 
-    # ---------------------------------------------------------
-    # 4. TRAIN & EVALUATE AGE + SOFA
-    # ---------------------------------------------------------
+    # --- Train & Evaluate Age + Sofa -------------------------------------
     print("    -> Evaluating Baseline 2: Age + SOFA Score...")
     lr_age_sofa = LogisticRegression(class_weight="balanced", random_state=RANDOM_STATE)
     lr_age_sofa.fit(age_sofa_train, y_train)
@@ -126,9 +131,7 @@ def main():
     age_coef, age_sofa_coef = lr_age_sofa.coef_[0]
     age_sofa_intercept = lr_age_sofa.intercept_[0]
 
-    # ---------------------------------------------------------
-    # 5. EXPORT PREDICTIONS
-    # ---------------------------------------------------------
+    # --- Export Predictions ----------------------------------------------
     df_preds = pd.DataFrame({
         "stay_id": stay_ids_test,
         "true_label": y_test,
@@ -137,9 +140,7 @@ def main():
     })
     df_preds.to_csv(PRED_OUT_DIR / "mimic_01_clinical_baselines_predictions.csv", index=False)
 
-    # ---------------------------------------------------------
-    # 6. EXPORT COMPREHENSIVE JSON
-    # ---------------------------------------------------------
+    # --- Export Comprehensive Json ---------------------------------------
     metrics = {
         "metadata": {
             "n_test_patients": int(len(y_test)),

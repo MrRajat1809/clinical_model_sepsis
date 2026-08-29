@@ -1,14 +1,22 @@
 """
-13_eicu_decision_curve_analysis.py
+Decision curve analysis on the external cohort.
 
-Decision Curve Analysis (DCA) on External Validation Cohort
-Evaluates the true clinical utility of the model by calculating Net Benefit.
+Discrimination and calibration do not answer whether acting on the model beats
+the two trivial policies. Net benefit does, by weighting false positives against
+true positives at the odds implied by each threshold probability:
 
-Features included:
-- Recreates the exact 80/20 Calibration/Test split for eICU.
-- Applies Platt Scaling and Isotonic Regression.
-- Computes Net Benefit for Uncalibrated, Platt, Isotonic, Treat All, and Treat None.
-- Generates a TRIPOD-compliant DCA plot, marking the optimal clinical thresholds.
+    net benefit = TP/N - (FP/N) * pt/(1 - pt)
+
+Computed across thresholds from 0.01 to 0.70 and compared against treat-all and
+treat-none, with a summary at six clinically plausible cut-points.
+
+Recreates the exact 80/20 split used in 11a so the calibrated probabilities are
+the same ones evaluated there; the two analyses describe the same patients.
+
+Reads:
+    outputs/metrics/eicu_champion_predictions.csv
+Writes:
+    outputs/metrics/eicu_dca_summary.csv and a TRIPOD-style decision curve
 """
 
 import time
@@ -28,16 +36,12 @@ from scipy.special import logit
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Flattened Global Outputs
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
 OUT_FIGURES = BASE_DIR / "outputs" / "figures"
 
-# Files
 PREDS_FILE = OUT_METRICS / "eicu_champion_predictions.csv"
 OUT_PLOT = OUT_FIGURES / "eicu_dca_plot.png"
 OUT_CSV = OUT_METRICS / "eicu_dca_summary.csv"

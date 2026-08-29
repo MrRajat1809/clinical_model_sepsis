@@ -1,27 +1,34 @@
 """
-04d_eicu_extract_pressors.py
+Extract vasopressor and inotrope administrations with their recorded units.
 
-Uses strict word boundaries to identify Norepinephrine, Epinephrine, Vasopressin, 
-Dopamine, and Phenylephrine from the eICU infusionDrug table.
-Extracts the embedded unit string (e.g., 'mcg/kg/min' from 'norepinephrine (mcg/kg/min)') 
-and prioritizes the `drugrate` column without applying any mathematical conversions.
+First of three steps that turn eICU's free-text infusion records into
+comparable doses. This step identifies drugs and parses values; it deliberately
+performs no arithmetic, so that extraction and conversion can be audited
+separately.
 
-Features included:
-- Swapped input dependency to `eicu_sepsis_phenotype_cohort.parquet` to break the 
-  circular dependency.
-- Anchors the extraction window to `sit_offset` and widens it to +/- 48 hours to 
-  ensure all relevant data is captured prior to the final Sepsis-3 adjudication.
-- Correctly fetches 'admissionweight' from the raw eICU patient table 
-  and joins it to the cohort before extraction.
+Drugs are matched with word-boundary regular expressions rather than plain
+substrings, which prevents norepinephrine from also matching as epinephrine.
+Six agents are captured: norepinephrine, epinephrine, vasopressin, dopamine,
+dobutamine and phenylephrine. Dobutamine is included because MIMIC-IV extracts
+it and both SOFA calculators score it for cardiovascular points.
+
+Units are read from the parenthetical suffix of the drug description, which is
+where eICU actually records them. Rates prefer the drugrate column and fall back
+to infusionrate. Admission weight is joined from the patient table for the
+weight-based conversions in 04e.
+
+Reads:
+    eicu_sepsis_phenotype_cohort.parquet
+    data/raw/eicu-crd/2.0/{infusionDrug, patient}
+Writes:
+    eicu_extracted_pressors_raw.parquet
 """
 
 import time
 from pathlib import Path
 import polars as pl
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 RAW_EICU_DIR = BASE_DIR / "data" / "raw" / "eicu-crd" / "2.0"
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
@@ -32,7 +39,7 @@ def extract_pressors():
     
     infusion_file = RAW_EICU_DIR / "infusionDrug.csv.gz"
     patient_file = RAW_EICU_DIR / "patient.csv.gz"
-    # [FIX]: Point to the Phenotype cohort to allow execution before script 05
+    # Point to the Phenotype cohort to allow execution before script 05
     cohort_file = PROCESSED_DIR / "eicu_sepsis_phenotype_cohort.parquet"
     out_file = PROCESSED_DIR / "eicu_extracted_pressors_raw.parquet"
     
@@ -42,7 +49,7 @@ def extract_pressors():
 
     print("    -> Loading Sepsis Phenotype cohort and fetching patient weights...")
     try:
-        # [FIX]: Load sit_offset instead of sepsis_onset_offset
+        # Load sit_offset instead of sepsis_onset_offset
         df_cohort_base = pl.read_parquet(cohort_file).select(["stay_id", "sit_offset"])
     except Exception as e:
         print(f"[ERROR] Failed to load cohort file at {cohort_file}. Error: {e}")
@@ -72,7 +79,7 @@ def extract_pressors():
     # Filter to cohort
     df_joined = df_infusion.join(df_cohort.lazy(), on="stay_id", how="inner")
     
-    # [FIX]: Calculate temporal window based on SIT and expand to +/- 48 hours
+    # Calculate temporal window based on SIT and expand to +/- 48 hours
     df_window = df_joined.with_columns(
         ((pl.col("event_time") - pl.col("sit_offset")) / 60.0).alias("hours_from_sit")
     ).filter(
@@ -87,6 +94,8 @@ def extract_pressors():
     regex_epi = r"\b(epinephrine|adrenaline|epi)\b"
     regex_vaso = r"\b(vasopressin|pitressin)\b"
     regex_dopa = r"\b(dopamine)\b"
+    # Parity with MIMIC, which extracts dobutamine for SOFA CV.
+    regex_dobu = r"\b(dobutamine|dobutrex)\b"
     regex_phenyl = r"\b(phenylephrine|neo-synephrine|neosynephrine)\b"
     
     df_mapped = df_drugs.with_columns(
@@ -94,6 +103,7 @@ def extract_pressors():
         .when(pl.col("drugname_lower").str.contains(regex_epi)).then(pl.lit("epinephrine"))
         .when(pl.col("drugname_lower").str.contains(regex_vaso)).then(pl.lit("vasopressin"))
         .when(pl.col("drugname_lower").str.contains(regex_dopa)).then(pl.lit("dopamine"))
+        .when(pl.col("drugname_lower").str.contains(regex_dobu)).then(pl.lit("dobutamine"))
         .when(pl.col("drugname_lower").str.contains(regex_phenyl)).then(pl.lit("phenylephrine"))
         .otherwise(pl.lit("other"))
         .alias("drug_type")

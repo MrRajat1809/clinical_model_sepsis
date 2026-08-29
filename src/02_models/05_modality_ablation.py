@@ -1,13 +1,24 @@
 """
-05_modality_ablation.py
+Which modality carries the prognostic signal.
 
-Phase 4: Explain WHY
-Executes a rigorous, hypothesis-driven Modality Ablation Study.
-- Uses the locked optimal hyperparameters from the Champion model.
-- Systematically tests the predictive value of Static, Aggregated, and Deep Latent features.
-- Performs 1,000-iteration paired bootstrap testing against the Champion model.
-- Computes Delta (Δ) and percentage improvements to quantify the exact value of each modality.
-- Generates publication-ready horizontal bar plots, CSV leaderboards, and prediction arrays.
+Fits the primary model's hyperparameters, held fixed, to seven combinations of
+three feature sources: static variables, engineered temporal summaries, and the
+deep BiGRU embeddings. Holding the hyperparameters constant means any difference
+is attributable to the inputs rather than to tuning.
+
+Combinations: each source alone, each pair, and all three together.
+
+Significance is assessed by paired bootstrap, 1000 resamples drawn once and
+applied identically to every model's predictions, so the comparisons share
+resampling noise. Two-sided empirical p-values come from the sign of the paired
+AUROC difference against the primary model.
+
+Reads:
+    outputs/metrics/mimic_champion_metrics.json for the hyperparameters
+    outputs/features/mimic_temporal_bigru_embeddings.npy
+Writes:
+    outputs/metrics/mimic_modality_ablation_results.csv
+    per-combination models, predictions and a summary figure
 """
 
 import time
@@ -27,9 +38,7 @@ from xgboost import XGBClassifier
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION & REPRODUCIBILITY
-# ==========================================
+# --- Configuration & Reproducibility -------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
@@ -38,7 +47,6 @@ PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
 CHAMPION_METRICS_FILE = BASE_DIR / "outputs" / "metrics" / "mimic_champion_metrics.json"
 LATENT_EMBEDDINGS_FILE = BASE_DIR / "outputs" / "features" / "mimic_temporal_bigru_embeddings.npy"
 
-# Outputs routed to global flat structure
 OUT_MODELS = BASE_DIR / "outputs" / "models"
 OUT_PREDS = BASE_DIR / "outputs" / "predictions"
 OUT_METRICS = BASE_DIR / "outputs" / "metrics"
@@ -61,17 +69,13 @@ def compute_p_value(dist_modality, dist_champion):
     p_value = 2 * min(np.mean(delta > 0), np.mean(delta < 0))
     return min(p_value, 1.0)
 
-# ==========================================
-# MAIN EXECUTION
-# ==========================================
+# --- Main Execution ------------------------------------------------------
 def main():
     set_seed(RANDOM_STATE)
     print("[*] Initiating Phase 5: Modality Ablation Study & Paired Bootstrapping...")
     start_time = time.time()
     
-    # ---------------------------------------------------------
-    # 1. LOAD CHAMPION HYPERPARAMETERS
-    # ---------------------------------------------------------
+    # --- Load Champion Hyperparameters -----------------------------------
     if not CHAMPION_METRICS_FILE.exists():
         print(f"[ERROR] Champion config not found at {CHAMPION_METRICS_FILE}.")
         return
@@ -80,9 +84,7 @@ def main():
         
     print("    -> Loaded Champion Hyperparameters to ensure fair evaluation.")
 
-    # ---------------------------------------------------------
-    # 2. LOAD DATA & SPLITS
-    # ---------------------------------------------------------
+    # --- Load Data & Splits ----------------------------------------------
     X_imputed = np.load(PROCESSED_DIR / "mimic_sepsis_imputed_tensor.npy")
     stay_ids = np.load(PROCESSED_DIR / "mimic_sepsis_tensor_stay_ids.npy")
     
@@ -94,14 +96,10 @@ def main():
     idx_test = np.load(OUT_MODELS / "mimic_test_set_indices.npy")
     stay_ids_test = np.load(OUT_MODELS / "mimic_stay_ids_test.npy")
 
-    # ---------------------------------------------------------
-    # 3. EXTRACT INDIVIDUAL MODALITIES
-    # ---------------------------------------------------------
+    # --- Extract Individual Modalities -----------------------------------
     print("    -> Extracting Modality 1: Static Features...")
-    static_cols = [col for col in ["age", "baseline_sofa", "charlson_comorbidity_index", "gender"] if col in df_cohort.columns]
+    static_cols = [col for col in ["age", "baseline_sofa"] if col in df_cohort.columns]
     df_static = df_cohort[static_cols].copy()
-    if "gender" in df_static.columns and df_static["gender"].dtype == 'O':
-        df_static["gender"] = (df_static["gender"] == "M").astype(int)
     
     scaler_static = StandardScaler()
     scaler_static.fit(df_static.fillna(0).values[idx_train_val])
@@ -123,9 +121,7 @@ def main():
         return
     X_temporal_emb = np.load(LATENT_EMBEDDINGS_FILE)
 
-    # ---------------------------------------------------------
-    # 4. DEFINE ABLATION COMBINATIONS
-    # ---------------------------------------------------------
+    # --- Define Ablation Combinations ------------------------------------
     combinations = {
         "Single Modality": {
             "Static Only": X_static,
@@ -145,9 +141,7 @@ def main():
     scale_weight = float((len(y[idx_train_val]) - sum(y[idx_train_val])) / sum(y[idx_train_val]))
     champion_config.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": -1})
 
-    # ---------------------------------------------------------
-    # 5. TRAIN & GENERATE PREDICTIONS
-    # ---------------------------------------------------------
+    # --- Train & Generate Predictions ------------------------------------
     print("\n    -> Training Modalities using Champion Hyperparameters...")
     
     all_test_preds = {}
@@ -176,9 +170,7 @@ def main():
                 "pred_probability": preds
             }).to_csv(OUT_PREDS / f"mimic_ablation_{safe_name}_predictions.csv", index=False)
 
-    # ---------------------------------------------------------
-    # 6. PAIRED BOOTSTRAP STATISTICAL TESTING
-    # ---------------------------------------------------------
+    # --- Paired Bootstrap Statistical Testing ----------------------------
     print(f"\n    -> Running {N_BOOTSTRAPS} Paired Bootstrap Iterations...")
     rng = np.random.default_rng(RANDOM_STATE)
     test_size = len(y_test)
@@ -242,9 +234,7 @@ def main():
     with open(OUT_METRICS / "mimic_ablation_metadata.json", "w") as f:
         json.dump({"n_bootstraps": N_BOOTSTRAPS, "random_seed": RANDOM_STATE, "champion_used": CHAMPION_NAME}, f, indent=4)
 
-    # ---------------------------------------------------------
-    # 7. GENERATE PUBLICATION PLOT
-    # ---------------------------------------------------------
+    # --- Generate Publication Plot ---------------------------------------
     print("    -> Generating horizontal bar plot...")
     df_plot = df_results.sort_values("AUROC", ascending=True).copy()
     
@@ -267,9 +257,7 @@ def main():
     plt.savefig(OUT_FIGURES / "mimic_ablation_plot.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # ---------------------------------------------------------
-    # 8. DISPLAY LEADERBOARD
-    # ---------------------------------------------------------
+    # --- Display Leaderboard ---------------------------------------------
     print("\n" + "="*95)
     print(" MODALITY ABLATION STUDY RESULTS (PAIRED BOOTSTRAP VS CHAMPION)")
     print("="*95)

@@ -1,15 +1,19 @@
 """
-08a_eicu_DTW_atlas_shape.py
+Pairwise DTW distance matrix over trajectory shape, eICU cohort.
 
-Computes the pairwise Dynamic Time Warping (DTW) distance matrix for the fully imputed 
-eICU 3D time-series tensor.
+eICU counterpart of the MIMIC-IV shape atlas. Each trajectory is mean-variance
+normalised along its own time axis before the distance is computed, isolating
+the morphology of physiological change from its magnitude.
 
-Features included:
-- Uses TimeSeriesScalerMeanVariance(). Because this scales each patient's 
-  trajectory independently of the cohort, it does not cause data leakage. It forces the DTW 
-  algorithm to evaluate trajectories based strictly on the morphology (shape) of their 
-  physiological changes.
-- Filenames explicitly designated with `_shape_` to prevent clashes with the Severity manifold.
+Computed in blocks over the upper triangle and mirrored. Dynamic time warping is
+O(N^2) in patients, so this runs from run_dtw_phate_atlas.sh rather than the main
+pipeline.
+
+Reads:
+    eicu_sepsis_imputed_tensor.npy, eicu_sepsis_tensor_stay_ids.npy
+Writes:
+    outputs/features/eicu_dtw_shape_pairwise_distance_matrix.npy
+    outputs/features/eicu_shape_atlas_stay_ids.npy
 """
 
 import time
@@ -24,9 +28,7 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 # Flattened Inputs

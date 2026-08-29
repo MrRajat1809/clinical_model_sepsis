@@ -1,16 +1,26 @@
 """
-04e_eicu_standardize_units.py
+Convert extracted infusion rates to standard dosing units.
 
-Takes the raw extracted pressor rates and their embedded unit strings, and explicitly 
-converts them into standardized mass-based dosing (mcg/kg/min) or units/min (Vasopressin).
+Second of the three pressor steps. Converts every rate to mcg/kg/min, or
+units/min for vasopressin, and records how each row was converted so the result
+can be audited rather than trusted.
 
-Features included:
-- Tracks weight source (measured vs. imputed 80kg) to maintain transparency.
-- Logs the exact conversion method pathway applied to every row.
-- Relies on a JSON configuration file (audited to outputs/metrics/) for standard ICU 
-  concentration assumptions to salvage volumetric (ml/hr) rates.
-- Isolates and exports unprocessable rows to an audit log for debugging and manual review.
-- Validates the resulting distributions (Median, IQR, 99th, Max) prior to NEQ calculation.
+Conversion paths, one per recorded unit, including a volumetric rescue: rates in
+mL/hour are converted using standard intensive care concentrations held in a
+configuration file, so infusions recorded only as a volume are not lost. Weight
+comes from the recorded admission weight where available, with an 80 kg fallback
+that is flagged rather than silent.
+
+Anything whose unit is not recognised becomes NULL and is exported to an audit
+file instead of being passed through. Per-drug upper bounds then remove
+physiologically impossible doses, with the number removed reported per drug.
+
+Reads:
+    eicu_extracted_pressors_raw.parquet
+Writes:
+    eicu_standardized_pressors.parquet
+    outputs/metrics/{eicu_standard_pressor_concentrations.json,
+                     eicu_unprocessable_pressors.csv}
 """
 
 import time
@@ -21,9 +31,7 @@ import polars as pl
 import warnings
 warnings.filterwarnings("ignore")
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# --- Configuration -------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parents[2]
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "eicu"
 
@@ -40,6 +48,7 @@ DEFAULT_CONCENTRATIONS = {
     "epinephrine": 16.0,     # 4 mg / 250 mL -> 16 mcg/mL
     "phenylephrine": 80.0,   # 20 mg / 250 mL -> 80 mcg/mL
     "dopamine": 1600.0,      # 400 mg / 250 mL -> 1600 mcg/mL
+    "dobutamine": 1000.0,    # 250 mg / 250 mL -> 1000 mcg/mL
     "vasopressin": 0.2       # 20 units / 100 mL -> 0.2 units/mL
 }
 
@@ -49,6 +58,7 @@ UPPER_BOUNDS = {
     "epinephrine": 5.0,
     "phenylephrine": 20.0,
     "dopamine": 50.0,
+    "dobutamine": 40.0,
     "vasopressin": 0.2
 }
 
@@ -60,7 +70,14 @@ def setup_config():
         return DEFAULT_CONCENTRATIONS
     
     with open(CONFIG_FILE, "r") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    # Backfill any drug added after the config file was first written
+    missing = {k: v for k, v in DEFAULT_CONCENTRATIONS.items() if k not in cfg}
+    if missing:
+        cfg.update(missing)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=4)
+    return cfg
 
 def standardize_units():
     print("[*] Initiating Audited Unit Standardization for eICU Pressors...")
@@ -117,6 +134,7 @@ def standardize_units():
                 .when(pl.col("drug_type") == "epinephrine").then((pl.col("raw_rate") * concentrations["epinephrine"]) / 60.0 / pl.col("weight_kg"))
                 .when(pl.col("drug_type") == "phenylephrine").then((pl.col("raw_rate") * concentrations["phenylephrine"]) / 60.0 / pl.col("weight_kg"))
                 .when(pl.col("drug_type") == "dopamine").then((pl.col("raw_rate") * concentrations["dopamine"]) / 60.0 / pl.col("weight_kg"))
+                .when(pl.col("drug_type") == "dobutamine").then((pl.col("raw_rate") * concentrations.get("dobutamine", 1000.0)) / 60.0 / pl.col("weight_kg"))
                 .otherwise(None)
             ).otherwise(None)
         ).alias("standardized_rate"),
