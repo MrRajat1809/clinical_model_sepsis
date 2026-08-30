@@ -61,6 +61,9 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FEATS]:
     d.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 N_BOOTSTRAPS = 100
 
 # --- Helper Functions ----------------------------------------------------
@@ -211,7 +214,7 @@ def main():
     models_config = {
         "LR_Static": (LogisticRegression(class_weight="balanced", random_state=RANDOM_STATE, max_iter=1000), X_stat_train, X_stat_test),
         "LR_Combined": (LogisticRegression(class_weight="balanced", random_state=RANDOM_STATE, max_iter=1000), X_comb_train, X_comb_test),
-        "RandomForest_Combined": (RandomForestClassifier(n_estimators=500, class_weight='balanced', n_jobs=-1, random_state=RANDOM_STATE), X_comb_train, X_comb_test)
+        "RandomForest_Combined": (RandomForestClassifier(n_estimators=500, class_weight='balanced', n_jobs=N_JOBS, random_state=RANDOM_STATE), X_comb_train, X_comb_test)
     }
 
     # Standard Sklearn Models
@@ -243,7 +246,7 @@ def main():
     t0 = time.time()
     X_xgb_tr, X_xgb_val, y_xgb_tr, y_xgb_val = train_test_split(X_comb_train, y_train, test_size=0.1, random_state=RANDOM_STATE, stratify=y_train)
     
-    xgb_model = XGBClassifier(n_estimators=1000, learning_rate=0.05, max_depth=6, scale_pos_weight=scale_weight, eval_metric="aucpr", early_stopping_rounds=30, random_state=RANDOM_STATE, n_jobs=-1)
+    xgb_model = XGBClassifier(n_estimators=1000, learning_rate=0.05, max_depth=6, scale_pos_weight=scale_weight, eval_metric="aucpr", early_stopping_rounds=30, random_state=RANDOM_STATE, n_jobs=N_JOBS)
     xgb_model.fit(X_xgb_tr, y_xgb_tr, eval_set=[(X_xgb_val, y_xgb_val)], verbose=False)
     
     preds_xgb = xgb_model.predict_proba(X_comb_test)[:, 1]

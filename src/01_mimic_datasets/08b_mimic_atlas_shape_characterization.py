@@ -35,6 +35,9 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # --- Configuration -------------------------------------------------------
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 BASE_DIR = Path(__file__).resolve().parents[2]
 
 PROCESSED_DIR = BASE_DIR / "data" / "processed" / "mimiciv"
@@ -115,7 +118,7 @@ def run_shape_atlas_characterization():
         knn=5,          
         decay=40,       
         t='auto',       
-        n_jobs=-1,
+        n_jobs=N_JOBS,
         random_state=42,
         verbose=False
     )

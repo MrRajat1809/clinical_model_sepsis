@@ -56,6 +56,9 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FIGURES]:
     d.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 N_BOOTSTRAPS = 1000
 CHAMPION_NAME = "Static + Aggregated (Champion)"
 
@@ -139,7 +142,7 @@ def main():
     }
 
     scale_weight = float((len(y[idx_train_val]) - sum(y[idx_train_val])) / sum(y[idx_train_val]))
-    champion_config.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": -1})
+    champion_config.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": N_JOBS})
 
     # --- Train & Generate Predictions ------------------------------------
     print("\n    -> Training Modalities using Champion Hyperparameters...")

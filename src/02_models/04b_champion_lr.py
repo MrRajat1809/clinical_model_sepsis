@@ -58,6 +58,9 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FEATS]:
     d.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 N_TRIALS = 30
 N_BOOTSTRAPS = 1000  
 
@@ -193,7 +196,7 @@ def main():
             "class_weight": "balanced",
             "max_iter": 500,
             "random_state": RANDOM_STATE,
-            "n_jobs": -1
+            "n_jobs": N_JOBS
         }
         
         cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
@@ -224,7 +227,7 @@ def main():
         "class_weight": "balanced",
         "max_iter": 1000, # Increased for final fit
         "random_state": RANDOM_STATE,
-        "n_jobs": -1
+        "n_jobs": N_JOBS
     })
     
     print("\n    [+] Optimal LR Hyperparameters Found:")

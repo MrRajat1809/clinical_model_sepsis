@@ -18,4 +18,17 @@ services:
               capabilities: [gpu]
     environment:
       - JUPYTER_TOKEN=biotech
+      # Determinism. PYTHONHASHSEED has to be set before the interpreter starts;
+      # the set_seed() helpers in 03a/03b/03c/03d assign it via os.environ at
+      # runtime, which the already-running process never re-reads, so setting it
+      # here is what actually makes it take effect.
+      - PYTHONHASHSEED=0
+      # Threaded linear algebra sums in thread order, so a machine with more
+      # cores reduces floating point in a different order and lands on slightly
+      # different values. Fixed here for the same reason N_JOBS is fixed in src/.
+      # Keep these in step with N_JOBS if you change either.
+      - OMP_NUM_THREADS=8
+      - OPENBLAS_NUM_THREADS=8
+      - MKL_NUM_THREADS=8
+      - NUMEXPR_NUM_THREADS=8
     shm_size: '8gb'

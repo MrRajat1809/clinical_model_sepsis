@@ -60,6 +60,9 @@ OUT_JSON = OUT_METRICS / "eicu_temporal_early_warning_metrics.json"
 
 TIME_WINDOWS = [6, 12, 18, 24]
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 
 def extract_static(df, ids):
     df_aligned = pd.DataFrame({"stay_id": ids}).merge(df, on="stay_id", how="left")
@@ -84,7 +87,7 @@ def main():
         print(f"[ERROR] Could not load Champion hyperparameters at {CHAMPION_METRICS}. Error: {e}")
         return
         
-    best_params.update({"random_state": RANDOM_STATE, "n_jobs": -1})
+    best_params.update({"random_state": RANDOM_STATE, "n_jobs": N_JOBS})
 
     # 1. Load Tensors & Cohorts
     print("    -> Loading MIMIC (Train) and eICU (Test) imputed tensors...")

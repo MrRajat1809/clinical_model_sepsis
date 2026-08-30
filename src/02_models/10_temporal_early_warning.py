@@ -59,6 +59,9 @@ OUT_JSON = OUT_METRICS / "mimic_temporal_early_warning_metrics.json"
 
 TIME_WINDOWS = [6, 12, 18, 24]
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 
 def main():
     print("[*] Initiating Clinical Actionability Analysis (Temporal Slicing)...")
@@ -76,7 +79,7 @@ def main():
         champ_data = json.load(f)
     best_params = champ_data["hyperparameters"]
     best_params["random_state"] = RANDOM_STATE
-    best_params["n_jobs"] = -1
+    best_params["n_jobs"] = N_JOBS
 
     # 2. Load Data & Splits
     print("    -> Loading MIMIC-IV 3D Tensor and Cohort splits...")

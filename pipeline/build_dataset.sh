@@ -22,9 +22,9 @@
 # For reproducing the paper instead, use pipeline/run_pipeline.sh.
 #
 # Usage:
-#   bash physionet/build_dataset.sh
-#   bash physionet/build_dataset.sh --dry-run
-#   bash physionet/build_dataset.sh --outdir release_v1
+#   bash pipeline/build_dataset.sh
+#   bash pipeline/build_dataset.sh --dry-run
+#   bash pipeline/build_dataset.sh --outdir release_v1
 #
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
@@ -119,9 +119,9 @@ run src/04_atlas_datasets/01b_verify_atlas_harmonization.py
 echo ""
 echo "########## Export ##########"
 if [[ $DRY_RUN -eq 1 ]]; then
-  echo "   would run: physionet/export_release.py --outdir $OUTDIR"
+  echo "   would run: pipeline/export_release.py --outdir $OUTDIR"
 else
-  "$PY" physionet/export_release.py --outdir "$OUTDIR"
+  "$PY" pipeline/export_release.py --outdir "$OUTDIR"
 fi
 
 echo ""
@@ -135,5 +135,5 @@ cat <<NEXT
     physionet validate $OUTDIR
     croissant-baker --input $OUTDIR
 
-  Submission text: physionet/metadata_draft.md
+  Submission text: pipeline/metadata_draft.md
 NEXT

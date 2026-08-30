@@ -1,49 +1,84 @@
-# Deep Learning & Core Machine Learning
-torch>=2.2.0
-torchvision
-torchaudio
-pytorch-tabnet
+# Pinned environment for the Sepsis-3 portability pipeline.
+#
+# Every version below was read from a container that completed a full pipeline
+# run, not chosen. That distinction matters: an unpinned data-layer package is a
+# silent source of moving results. Rebuilding this image on a second machine
+# resolved a different DuckDB, and the MIMIC cohort moved with it. Nothing here
+# may be relaxed to >= without accepting that the numbers can change between
+# builds.
+#
+# To re-lock against a future environment, run this inside a container that has
+# completed a run and replace the pins below with its output. numpy and tqdm
+# come from the base image's conda environment and are recorded as
+# `name @ file://...` rather than `name==version`, so read those two with
+# `pip show numpy tqdm`:
+#
+#     pip freeze
+#
+# torch, torchvision and torchaudio are the versions already present in the
+# base image (pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime). They are pinned so
+# pip treats them as satisfied instead of upgrading them out from under CUDA.
+
+# --- Numerical core --------------------------------------------------------
+# numpy stays on 1.x: torch 2.2.1 is built against the numpy 1 ABI, and scipy
+# 1.15 / scikit-learn 1.7 below are installed as builds that match it.
+numpy==1.26.3
+scipy==1.15.3
+pandas==2.3.3
+polars==1.42.1
+pyarrow==24.0.0
+# 1.1.3 fails the eICU temporal slice with "INTERNAL Error: Trying to seek a
+# compressed CSV File" partway through the large gzipped source tables: the
+# scans are correct, that release just cannot re-read a gzip stream it has
+# already consumed. Do not lower this pin.
+duckdb==1.5.4
+scikit-learn==1.7.2
 xgboost==1.7.6
-scikit-learn
+# Imported directly by src/ but never declared before -- they arrived only as
+# transitive dependencies of scikit-learn and optuna.
+joblib==1.5.3
+tqdm==4.65.0
 
-# Time-Series Analysis
-tslearn
-dtaidistance
-# [ADDED P4-12]: imported by the pipeline but previously unlisted
-pypots            # SAITS imputation (07b)
-optuna            # hyperparameter search (04a, 04b)
-POT               # optimal transport, imported as `ot` (atlas 01a, 06, 07)
+# --- Deep learning ---------------------------------------------------------
+torch==2.2.1
+torchvision==0.17.1
+torchaudio==2.2.1
+pypots==1.5                     # SAITS imputation (07b)
 
-# Advanced Statistics & Survival Analysis
-statsmodels
-imbalanced-learn
-scikit-survival
+# --- Modelling and analysis ------------------------------------------------
+optuna==4.9.0                   # hyperparameter search (04a, 04b)
+POT==0.9.7.post1                # optimal transport, imported as `ot`
+tslearn==0.8.1                  # cdist_dtw (08a, 09a)
+shap==0.49.1                    # consensus SHAP (07)
+phate==2.0.0                    # manifolds (02_compute_joint_manifold, 08b, 09b)
 
-# Data Manipulation & Fast Processing Engine
-pandas
-numpy
-polars
-pyarrow
-duckdb
+# --- Plotting --------------------------------------------------------------
+matplotlib==3.10.9
+seaborn==0.13.2
 
-# Data I/O & Formatting
-openpyxl
-tabulate
+# --- Notebook environment --------------------------------------------------
+# Not imported by src/, but the image needs both: the Dockerfile's CMD is
+# `jupyter lab`, and the IRkernel::installspec build step needs the jupyter
+# binary on PATH.
+jupyterlab==4.6.1
+ipywidgets==8.1.8
 
-# Visualization & Plotting
-matplotlib
-seaborn
-SciencePlots
-statannotations
-d3blocks
-
-# Dimensionality Reduction & Explainable AI (XAI)
-openTSNE
-umap-learn
-phate
-shap
-
-# Development Environment & Language Integration
-jupyterlab
-ipywidgets
-rpy2
+# --- Not imported anywhere under src/ --------------------------------------
+# Held back rather than pinned. Each one carries its own transitive
+# constraints -- scikit-survival and statannotations in particular pin
+# scikit-learn and seaborn -- and letting the resolver satisfy a package the
+# pipeline never imports is how a pinned scikit-learn quietly becomes a
+# different one. Uncomment what a notebook actually needs, with a version.
+# pytorch-tabnet
+# dtaidistance
+# statsmodels
+# imbalanced-learn
+# scikit-survival
+# openpyxl
+# tabulate
+# SciencePlots
+# statannotations
+# d3blocks
+# openTSNE
+# umap-learn
+# rpy2

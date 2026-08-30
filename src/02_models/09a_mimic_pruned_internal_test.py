@@ -48,6 +48,9 @@ OUT_MODELS.mkdir(parents=True, exist_ok=True)
 PRUNED_MODEL_FILE = OUT_MODELS / "mimic_pruned_champion_xgboost.joblib"
 
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 
 def main():
     print("[*] Initiating Phase 10: Pruned Model Validation & Export...")
@@ -111,7 +114,7 @@ def main():
         max_depth=4,
         scale_pos_weight=scale_pos_weight,
         random_state=RANDOM_STATE,
-        n_jobs=-1
+        n_jobs=N_JOBS
     )
     pruned_xgb.fit(X_train_pruned, y_train)
     

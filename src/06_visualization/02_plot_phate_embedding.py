@@ -17,6 +17,9 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 BASE_DIR = Path(__file__).resolve().parents[2]
 TENSOR_DIR = BASE_DIR / "data" / "processed" / "mimiciv" / "tensors"
 CLUSTER_DIR = BASE_DIR / "data" / "processed" / "mimiciv" / "clusters"
@@ -61,7 +64,7 @@ def plot_phate():
     
     print("    -> Initializing and fitting PHATE (this may take a moment)...")
     phate_operator = phate.PHATE(
-        n_jobs=-1,
+        n_jobs=N_JOBS,
         random_state=42,
         verbose=False,
         t='auto',     # Automatically determine diffusion time

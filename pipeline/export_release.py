@@ -5,7 +5,7 @@ Builds the ClinicalTensorSepsis release package from artifacts the pipeline has
 already written. Read-only with respect to the pipeline: nothing under src/,
 data/processed/ or outputs/ is modified.
 
-Format decisions follow physionet/rules.txt:
+Format decisions follow PhysioNet's author guidelines:
   gzip-compressed CSV, matching what MIMIC-IV and eICU-CRD themselves ship
   wide layout, one observation per row, per the tidy-data requirement
   strings not label codes, read from the cohort tables rather than the
@@ -14,8 +14,8 @@ Format decisions follow physionet/rules.txt:
   integer offsets in minutes, never absolute dates
   no pickle-format file is ever selected
 
-    python physionet/export_release.py
-    python physionet/export_release.py --outdir release
+    python pipeline/export_release.py
+    python pipeline/export_release.py --outdir release
 """
 
 import argparse
@@ -448,7 +448,7 @@ def main():
         print(f"\n[!] {len(set(missing_inputs))} input(s) missing; package is incomplete:")
         for m in sorted(set(missing_inputs)):
             print(f"      {m}")
-        print("    Run physionet/build_dataset.sh first.")
+        print("    Run pipeline/build_dataset.sh first.")
         sys.exit(1)
 
     print("\n  Next: physionet validate " + str(out.relative_to(BASE)))

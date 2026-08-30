@@ -65,6 +65,9 @@ for d in [OUT_MODELS, OUT_PREDS, OUT_METRICS, OUT_FEATS]:
     d.mkdir(parents=True, exist_ok=True)
 
 RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 N_TRIALS = 30
 N_BOOTSTRAPS = 1000  # Increased for the final champion evaluation
 
@@ -208,7 +211,7 @@ def main():
             "scale_pos_weight": scale_weight,
             "eval_metric": "auc",
             "random_state": RANDOM_STATE,
-            "n_jobs": -1
+            "n_jobs": N_JOBS
         }
         
         cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
@@ -241,7 +244,7 @@ def main():
     # Early stopping only applies while an eval_set is supplied. The
     # final refit and every downstream reuse fit without one, so drop the key.
     best_params.pop("early_stopping_rounds", None)
-    best_params.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": -1})
+    best_params.update({"scale_pos_weight": scale_weight, "random_state": RANDOM_STATE, "n_jobs": N_JOBS})
     
     print("\n    [+] Optimal Hyperparameters Found:")
     for k, v in best_params.items():

@@ -11,7 +11,9 @@ A culture and an episode are coupled when either:
     the culture precedes antibiotics by no more than 72 h, or
     antibiotics precede the culture by no more than 24 h
 
-An episode must reach 72 h of cumulative treatment, waived when the ICU stay is
+An episode must reach 72 h of cumulative treatment -- the union of its
+prescription intervals, so concurrent agents count once and a gap between
+courses counts not at all -- waived when the ICU stay is
 shorter than three days. SIT is the earlier of the culture time and the
 antibiotic start time, restricted to +/- 24 h around ICU admission. The earliest
 qualifying event per patient is kept.
@@ -69,13 +71,27 @@ def main():
           AND regexp_matches(lower(drug), '.*(vanco|cef|peni|mycin|floxacin|bactam|cillin|mero|doxy|azithro|linezolid|tazo).*')
     ),
     abx_lag AS (
-        -- Get the stop time of the previous antibiotic for this patient/admission
+        -- Get the stop time of the previous antibiotic for this patient/admission.
+        --
+        -- starttime alone is not a unique ordering: concurrent IV antibiotics
+        -- are prescribed at the same timestamp routinely and MIMIC records
+        -- those times coarsely, so a patient-admission carries many ties.
+        -- Ordering on it alone leaves the row order among ties to the engine,
+        -- and a different DuckDB build or thread count then returns a
+        -- different prev_stop, which moves episode boundaries and changes who
+        -- clears the 72-hour rule below. (stoptime, drug) completes the key;
+        -- rows tied on all three are indistinguishable in every column this
+        -- query uses.
         SELECT 
             subject_id, 
             hadm_id, 
             starttime, 
             stoptime,
-            LAG(stoptime) OVER (PARTITION BY subject_id, hadm_id ORDER BY starttime) as prev_stop
+            drug,
+            LAG(stoptime) OVER (
+                PARTITION BY subject_id, hadm_id
+                ORDER BY starttime, stoptime, drug
+            ) as prev_stop
         FROM raw_abx
     ),
     abx_islands AS (
@@ -85,6 +101,7 @@ def main():
             hadm_id, 
             starttime, 
             stoptime,
+            drug,
             CASE 
                 WHEN prev_stop IS NULL THEN 1 
                 WHEN starttime > prev_stop + INTERVAL 24 HOUR THEN 1 
@@ -93,24 +110,92 @@ def main():
         FROM abx_lag
     ),
     abx_groups AS (
-        -- Create a unique ID for each continuous treatment episode
+        -- Create a unique ID for each continuous treatment episode. The
+        -- ordering matches abx_lag exactly: the island flags were computed
+        -- under that order, so summing them under any other order would count
+        -- boundaries the flags were not describing. The frame is stated rather
+        -- than defaulted -- the default RANGE frame makes tied rows peers and
+        -- hands them one shared episode id, which is not a running count.
         SELECT 
             subject_id, 
             hadm_id, 
             starttime, 
             stoptime,
-            SUM(is_new_island) OVER (PARTITION BY subject_id, hadm_id ORDER BY starttime) as episode_id
+            drug,
+            SUM(is_new_island) OVER (
+                PARTITION BY subject_id, hadm_id
+                ORDER BY starttime, stoptime, drug
+                ROWS UNBOUNDED PRECEDING
+            ) as episode_id
         FROM abx_islands
     ),
-    iv_antibiotic_episodes AS (
-        -- Collapse the episodes into start, stop, and total duration
-        SELECT 
-            subject_id, 
-            hadm_id, 
-            MIN(starttime) AS abx_start_time,
-            MAX(stoptime) AS abx_stop_time,
-            EXTRACT(EPOCH FROM (MAX(stoptime) - MIN(starttime))) / 3600.0 AS abx_duration_hours
+    abx_coverage AS (
+        -- Inside an episode, prescriptions overlap (concurrent agents) and leave
+        -- gaps (up to the 24 h the island rule tolerates). Carry the furthest
+        -- stop time reached by anything ordered earlier, so the two can be told
+        -- apart.
+        SELECT
+            subject_id,
+            hadm_id,
+            episode_id,
+            starttime,
+            stoptime,
+            drug,
+            MAX(stoptime) OVER (
+                PARTITION BY subject_id, hadm_id, episode_id
+                ORDER BY starttime, stoptime, drug
+                ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+            ) AS covered_until
         FROM abx_groups
+    ),
+    abx_blocks AS (
+        -- A prescription starting after everything before it has stopped opens a
+        -- new block of continuous cover. One starting at or before that point
+        -- extends the block already running.
+        SELECT
+            subject_id,
+            hadm_id,
+            episode_id,
+            starttime,
+            stoptime,
+            SUM(CASE WHEN covered_until IS NULL OR starttime > covered_until
+                     THEN 1 ELSE 0 END) OVER (
+                PARTITION BY subject_id, hadm_id, episode_id
+                ORDER BY starttime, stoptime, drug
+                ROWS UNBOUNDED PRECEDING
+            ) AS block_id
+        FROM abx_coverage
+    ),
+    abx_block_spans AS (
+        -- Every prescription in a block overlaps the cover running before it, so
+        -- the block's union is exactly its first start to its last stop.
+        SELECT
+            subject_id,
+            hadm_id,
+            episode_id,
+            MIN(starttime) AS block_start,
+            MAX(stoptime) AS block_stop
+        FROM abx_blocks
+        GROUP BY subject_id, hadm_id, episode_id, block_id
+    ),
+    iv_antibiotic_episodes AS (
+        -- Collapse the episode into start, stop, and the time treatment actually
+        -- covered.
+        --
+        -- The duration is the union of the prescription intervals, not the span
+        -- from first start to last stop. The span counted the gaps between
+        -- courses as treatment, which is what let a patient clear the 72-hour
+        -- rule below on the strength of a gap. Concurrent agents count once, not
+        -- once each: two drugs running together for a day are one day of
+        -- treatment. abx_start_time and abx_stop_time are the same values the
+        -- span produced -- only the duration changes.
+        SELECT
+            subject_id,
+            hadm_id,
+            MIN(block_start) AS abx_start_time,
+            MAX(block_stop) AS abx_stop_time,
+            SUM(EXTRACT(EPOCH FROM (block_stop - block_start))) / 3600.0 AS abx_duration_hours
+        FROM abx_block_spans
         GROUP BY subject_id, hadm_id, episode_id
     ),
     coupled_events AS (
@@ -155,7 +240,19 @@ def main():
     ),
     first_infections AS (
         SELECT *,
-               ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY suspected_infection_time ASC) as infection_seq
+               -- suspected_infection_time ties whenever several cultures on the
+               -- admission couple to the same antibiotic episode. Left untied,
+               -- the surviving row -- and with it the culture and antibiotic
+               -- times that set the +/-48h window for every downstream stage --
+               -- is whichever the engine happened to emit first. Rows tied on
+               -- all four keys are identical in every column selected here.
+               ROW_NUMBER() OVER (
+                   PARTITION BY subject_id
+                   ORDER BY suspected_infection_time ASC,
+                            culture_time ASC,
+                            abx_start_time ASC,
+                            abx_stop_time ASC
+               ) as infection_seq
         FROM coupled_events
         WHERE 
             -- Restrict SIT to the immediate ICU presentation window

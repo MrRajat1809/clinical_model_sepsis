@@ -35,6 +35,8 @@ cd "$(dirname "$0")/.."
 PY="${PYTHON:-python}"
 LOG_DIR="outputs/logs"
 RUN_LOG="${LOG_DIR}/dtw_phate_atlas.log"
+RUN_ID="$(date '+%Y%m%d-%H%M%S')"
+RUN_T0=$(date +%s)
 COHORT="both"
 DRY_RUN=0
 
@@ -157,5 +159,23 @@ within-cohort DTW manifolds live here.
 NEXT
 }
 
-main 2>&1 | tee "$RUN_LOG"
+# Append, never truncate. Each cohort takes hours and the two are often run
+# days apart; a second invocation must extend the record, not replace it.
+{
+  echo ""
+  echo "################################################################################"
+  echo "# SESSION $RUN_ID  started $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "################################################################################"
+} >> "$RUN_LOG"
+
+rc=0
+main 2>&1 | tee -a "$RUN_LOG" || rc=$?
+
+{
+  el=$(( $(date +%s) - RUN_T0 ))
+  printf '\n# SESSION %s ended %s after %dh %02dm, exit %d\n' \
+    "$RUN_ID" "$(date '+%Y-%m-%d %H:%M:%S')" $((el / 3600)) $(((el % 3600) / 60)) "$rc"
+  echo "################################################################################"
+} >> "$RUN_LOG"
+exit $rc
 exit "${PIPESTATUS[0]}"

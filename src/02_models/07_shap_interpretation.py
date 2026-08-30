@@ -2,15 +2,16 @@
 Consensus SHAP attribution across 50 model seeds.
 
 A single model's SHAP values reflect one particular fit as much as the data, so
-this refits the primary configuration under 50 different random seeds and
-aggregates. Exact tree SHAP values are computed on the held-out test set for
-each fit.
+this refits the primary configuration 50 times, each on a bootstrap resample of
+the training rows under its own seed, and aggregates. Exact tree SHAP values are
+computed on the fixed held-out test set for each fit.
 
 Two aggregations are produced:
     patient level  attributions averaged across seeds, for beeswarm plots
     global         mean absolute SHAP per seed, then the mean and 2.5th-97.5th
-                   percentile across seeds, so feature importance carries an
-                   interval reflecting initialisation variance
+                   percentile across fits, so feature importance carries an
+                   interval reflecting both initialisation and sampling
+                   variance
 
 Reads:
     outputs/models/mimic_champion_xgboost.joblib for the configuration
@@ -124,12 +125,23 @@ def main():
             
         current_seed = BASE_SEED + i
         
+        # Each fit gets a bootstrap of the training rows as well as its own seed.
+        # Varying the seed alone measured initialisation scatter and reported it
+        # as a confidence interval, which left the bands far too narrow: a 0.03%
+        # change in cohort membership moved lactate_Mean from 0.259 to 0.108,
+        # outside an interval of 0.229-0.290. Resampling the training data puts
+        # sampling variance -- the dominant term, and the one a reader assumes is
+        # there -- inside the interval. The test set stays fixed so the
+        # attributions remain comparable across fits.
+        rng = np.random.default_rng(current_seed)
+        boot = rng.integers(0, len(X_train_scaled), len(X_train_scaled))
+        
         # Clone model to preserve optimal hyperparams but set a new seed
         model_clone = clone(base_champion)
         model_clone.set_params(random_state=current_seed)
         
         # Suppress XGBoost output during the loop
-        model_clone.fit(X_train_scaled, y_train, verbose=False)
+        model_clone.fit(X_train_scaled[boot], np.asarray(y_train)[boot], verbose=False)
         
         # Compute exact SHAP values for the test set
         explainer = shap.TreeExplainer(model_clone)
@@ -149,7 +161,7 @@ def main():
     # Get mean absolute SHAP for each feature per model, shape: (50, n_features)
     model_mean_abs_shap = np.mean(np.abs(all_shap_values), axis=1)
     
-    # Calculate global mean and 95% CIs across the 50 runs
+    # Global mean and 95% interval across the 50 bootstrap fits
     global_mean_importance = np.mean(model_mean_abs_shap, axis=0)
     lower_ci = np.percentile(model_mean_abs_shap, 2.5, axis=0)
     upper_ci = np.percentile(model_mean_abs_shap, 97.5, axis=0)

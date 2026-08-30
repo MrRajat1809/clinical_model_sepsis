@@ -188,7 +188,8 @@ def main():
         WHERE lower(o.cellpath) LIKE '%urine%'
           AND o.cellvaluenumeric IS NOT NULL
         GROUP BY lower(o.cellpath)
-        ORDER BY n DESC LIMIT 40
+        -- cellpath breaks ties on n, so the 40-row cut is the same every run.
+        ORDER BY n DESC, cellpath ASC LIMIT 40
     """).fetchall()
     import pandas as _pd
     _metrics = BASE_DIR / "outputs" / "metrics"

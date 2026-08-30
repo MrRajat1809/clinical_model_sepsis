@@ -60,6 +60,9 @@ for d in [OUT_MODELS, OUT_FEATS, OUT_METRICS, OUT_FIGURES]:
 FEAT_NAMES_FILE = OUT_FEATS / "mimic_champion_features.json"
 
 BASE_RANDOM_STATE = 42
+# Fixed rather than -1: thread count changes the order of floating-point
+# accumulation, so "all cores" makes results depend on the machine.
+N_JOBS = 8
 N_ITERATIONS = 100
 
 # --- Custom Scorer to Bypass Api Clash -----------------------------------
@@ -136,7 +139,7 @@ def main():
             max_depth=4,
             scale_pos_weight=scale_pos_weight,
             random_state=current_seed,
-            n_jobs=-1  
+            n_jobs=N_JOBS  
         )
 
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=current_seed)

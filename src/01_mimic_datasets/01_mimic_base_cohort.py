@@ -51,7 +51,14 @@ def main():
             outtime, 
             los,
             first_careunit,
-            ROW_NUMBER() OVER (PARTITION BY subject_id ORDER BY intime ASC) as icu_seq
+            -- stay_id completes the ordering. Two ICU stays for one patient
+            -- sharing an intime are rare but not impossible, and without a
+            -- tiebreak the engine decides which one counts as the first --
+            -- a decision that changes with the DuckDB build and thread count.
+            ROW_NUMBER() OVER (
+                PARTITION BY subject_id
+                ORDER BY intime ASC, stay_id ASC
+            ) as icu_seq
         FROM read_csv_auto('{MIMIC_DIR}/icu/icustays.csv.gz')
     ),
     base_cohort AS (
