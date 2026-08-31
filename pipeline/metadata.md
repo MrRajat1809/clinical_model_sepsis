@@ -1,19 +1,3 @@
-# PhysioNet submission text — ClinicalTensorSepsis
-
-Draft for the PhysioNet project management system. Each section below maps to one
-field in their submission form; paste them across one at a time.
-
-Placeholders written as `{{LIKE_THIS}}` must be filled from the final pipeline
-run. The value in brackets after each is what the previous run produced, given
-only so you can sanity-check the new one — do not ship the old numbers.
-
-Formatting rules this draft already follows, from `rules.txt`:
-
-- no URLs anywhere in the body text; every external resource is a numbered
-  reference cited as [n]
-- Vancouver reference style
-- title uses only letters, numbers, spaces and hyphens — no comma, no colon
-- abstract is under 250 words and contains no references
 
 ---
 
@@ -33,13 +17,6 @@ be peer-reviewed before review.
 ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Physiology Derived from MIMIC-IV and eICU-CRD
 ```
 
-107 characters. If an editor reads "Derived from MIMIC-IV" as use of the MIMIC
-acronym and asks for `Ext`, the fallback is:
-
-```
-MIMIC-IV-Ext-ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Physiology from MIMIC-IV and eICU-CRD
-```
-
 ---
 
 ## Version
@@ -52,8 +29,6 @@ MIMIC-IV-Ext-ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Phys
 
 ## Abstract
 
-*(target under 250 words; current draft ~215)*
-
 Sepsis is the leading cause of in-hospital mortality worldwide, and prognostic
 models built on one intensive care database frequently degrade when applied to
 another. Progress on that problem is limited by the absence of cohorts that are
@@ -62,12 +37,11 @@ are otherwise indistinguishable from differences in physiology.
 
 ClinicalTensorSepsis provides two Sepsis-3 cohorts assembled under a single
 specification from MIMIC-IV and the eICU Collaborative Research Database.
-{{TOTAL_N}} intensive care stays are included [previous run: 20,668], each with
-thirty clinical variables placed on a common hourly grid spanning the first
-twenty-four hours after sepsis onset. Sepsis onset is defined as the coincidence
-of suspected infection with an acute increase of at least two points in the
-Sequential Organ Failure Assessment score, adjudicated by the same code in both
-databases.
+20,569 intensive care stays are included, each with thirty clinical variables placed 
+on a common hourly grid spanning the first twenty-four hours after sepsis onset. 
+Sepsis onset is defined as the coincidence of suspected infection with an acute 
+increase of at least two points in the Sequential Organ Failure Assessment score, 
+adjudicated by the same code in both databases.
 
 The release contains observed measurements with their missingness preserved, a
 reconstructed version produced by a transformer-based imputation model trained
@@ -196,7 +170,7 @@ Values outside prespecified physiological bounds were set to missing rather than
 clipped, so that implausible charting artefacts are reconstructed from the
 patient's own trajectory rather than replaced by a boundary value.
 
-Reconstruction used a self-attention imputation model for time series [5],
+Reconstruction used a self-attention imputation model for time series(SAITS) [5],
 trained on the MIMIC-IV cohort alone. The eICU-CRD cohort was reconstructed by
 applying the fitted scaler and weights without retraining, so that both cohorts
 are reconstructed by the same function and any difference between them reflects
@@ -233,7 +207,9 @@ alone in both databases.
 The index is provided in the cohort table but users should read the limitation
 recorded in Usage Notes before treating it as a measure of pre-admission burden.
 
-{{CCI_LIMITATION_WORDING}}
+**The Charlson Comorbidity Index relies heavily on text-based fallback in eICU-CRD.** In eICU-CRD, 
+11.3% of diagnoses lack usable ICD codes and were scored via text matching. Furthermore, 51.9% of 
+stays scored zero, suggesting potential undercoding rather than true absence of comorbidity.
 
 ---
 
@@ -245,17 +221,16 @@ except the data dictionary and cohort flow, which are uncompressed.
 | File | Rows | Description |
 | --- | --- | --- |
 | `readme.txt` | — | package description and file summary |
-| `cohort.csv.gz` | {{TOTAL_N}} | one row per intensive care stay |
-| `hourly_observed.csv.gz` | {{TOTAL_N}} x 24 | measured values; blank means no observation |
-| `hourly_imputed.csv.gz` | {{TOTAL_N}} x 24 | reconstructed values; complete |
-| `features_model.csv.gz` | {{TOTAL_N}} | summary representation, 122 columns |
-| `features_transported.csv.gz` | {{TOTAL_N}} | same representation after optimal transport |
+| `cohort.csv.gz` | 20,569 | one row per intensive care stay |
+| `hourly_observed.csv.gz` | 20,569 x 24 | measured values; blank means no observation |
+| `hourly_imputed.csv.gz` | 20,569 x 24 | reconstructed values; complete |
+| `features_model.csv.gz` | 20,569 | summary representation, 122 columns |
+| `features_transported.csv.gz` | 20,569 | same representation after optimal transport |
 | `data_dictionary.csv` | ~160 | per-variable documentation |
 | `cohort_flow.csv` | ~15 | cohort attrition at each step |
 | `sha256sums.txt` | — | checksums for every file |
 
-Cohort sizes are {{MIMIC_N}} stays from MIMIC-IV [previous run: 13,018] and
-{{EICU_N}} from eICU-CRD [previous run: 7,650].
+Cohort sizes are 12,919 stays from MIMIC-IV and 7,650 from eICU-CRD.
 
 Times are expressed as integer offsets in minutes from intensive care admission.
 No absolute dates or timestamps are included in any file.
@@ -322,7 +297,9 @@ ascending stay identifier. This is a property of the source database.
 **The transported file contains mapped values, not measurements.** Do not treat
 eICU rows in `features_transported.csv.gz` as observed physiology.
 
-{{CCI_LIMITATION_WORDING}}
+**The Charlson Comorbidity Index relies heavily on text-based fallback in eICU-CRD.** In eICU-CRD, 
+11.3% of diagnoses lack usable ICD codes and were scored via text matching. Furthermore, 51.9% of 
+stays scored zero, suggesting potential undercoding rather than true absence of comorbidity.
 
 ### Complementary resources
 
@@ -364,11 +341,9 @@ required training and agreed to the data use agreement.
 
 ## Acknowledgements
 
-{{ACKNOWLEDGEMENTS}}
+The author gratefully acknowledges the MIT Laboratory for Computational Physiology and the eICU Research Institute for compiling the MIMIC-IV and eICU-CRD databases, and PhysioNet for providing the credentialed access that made this work possible.
 
-Suggested content: the teams responsible for MIMIC-IV and eICU-CRD and for
-maintaining PhysioNet; any institutional support; and funding, with grant numbers
-if applicable. If there is no funding to declare, say so explicitly.
+There is no funding, grant, or institutional support to declare for this dataset.
 
 ---
 
@@ -382,55 +357,31 @@ The author has no conflicts of interest to declare.
 
 ## References
 
-Vancouver style, numbered in order of first citation in the body text.
-
 1. Johnson AEW, Bulgarelli L, Shen L, Gayles A, Shammout A, Horng S, et al.
    MIMIC-IV a freely accessible electronic health record dataset. Sci Data. 2023;
-   10:1. {{VERIFY_CITATION}}
+   10:1.
 
 2. Pollard TJ, Johnson AEW, Raffa JD, Celi LA, Mark RG, Badawi O. The eICU
    Collaborative Research Database a freely available multi-center database for
-   critical care research. Sci Data. 2018; 5:180178. {{VERIFY_CITATION}}
+   critical care research. Sci Data. 2018; 5:180178.
 
 3. Singer M, Deutschman CS, Seymour CW, Shankar-Hari M, Annane D, Bauer M, et al.
    The Third International Consensus Definitions for Sepsis and Septic Shock
-   Sepsis-3. JAMA. 2016; 315:801-810. {{VERIFY_CITATION}}
+   Sepsis-3. JAMA. 2016; 315:801-810.
 
 4. Brown SM, Lanspa MJ, Jones JP, Kuttler KG, Li Y, Carlson R, et al. Survival
    after shock requiring high-dose vasopressor therapy. Chest. 2013;
-   143:664-671. {{VERIFY_CITATION}}
+   143:664-671.
 
 5. Du W, Cote D, Liu Y. SAITS self-attention-based imputation for time series.
-   Expert Syst Appl. 2023; 219:119619. {{VERIFY_CITATION}}
+   Expert Syst Appl. 2023; 219:119619.
 
 6. Courty N, Flamary R, Tuia D, Rakotomamonjy A. Optimal transport for domain
    adaptation. IEEE Trans Pattern Anal Mach Intell. 2017; 39:1853-1865.
-   {{VERIFY_CITATION}}
+  
 
 7. Quan H, Sundararajan V, Halfon P, Fong A, Burnand B, Luthi JC, et al. Coding
    algorithms for defining comorbidities in ICD-9-CM and ICD-10 administrative
-   data. Med Care. 2005; 43:1130-1139. {{VERIFY_CITATION}}
+   data. Med Care. 2005; 43:1130-1139.
 
-8. {{GITHUB_REPOSITORY_CITATION}} — the code repository. Cite as a software
-   reference with author, title, version or commit, and year. The URL belongs
-   here, not in the body text.
-
-Every `{{VERIFY_CITATION}}` marks a reference I have written from memory. Check
-each against the actual record before submitting; volume, page and year in
-particular.
-
----
-
-## Pre-submission checklist
-
-- [ ] fill every `{{PLACEHOLDER}}` from the final run
-- [ ] verify all eight references against the real records
-- [ ] confirm no absolute dates in any released file
-- [ ] confirm no `.joblib`, `.pkl` or other pickle-format file is included
-- [ ] confirm no URL appears in any body text section
-- [ ] run `physionet validate release/`
-- [ ] run `croissant-baker --input release/`
-- [ ] regenerate `sha256sums.txt` after any file changes
-- [ ] select licence: PhysioNet Credentialed Health Data License 1.5.0
-- [ ] select project type: Database
-- [ ] confirm cohort counts in the abstract match `cohort_flow.csv`
+8. Kumar P. clinical_model_sepsis [Internet]. GitHub; 2026. Available from: https://github.com/MrRajat1809/clinical_model_sepsis
