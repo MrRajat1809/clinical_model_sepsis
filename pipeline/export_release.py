@@ -310,16 +310,42 @@ def build_dictionary(hourly_cols, model_cols) -> pd.DataFrame:
                      "description": f"Observed density MIMIC-IV {dm}% eICU-CRD {de}%" if dm != "" else ""})
 
     for c in model_cols:
+        if c == "baseline_sofa":
+            desc = "Total SOFA score in the baseline window"
+        else:
+            desc = "Static variable" if "_" not in c else f"{c.rsplit('_', 1)[1]} of {c.rsplit('_', 1)[0]} across the 24 hour window"
+            
         rows.append({"file": "features_model.csv.gz / features_transported.csv.gz",
                      "variable": c, "unit": "", "mimic_source": "", "eicu_source": "",
                      "hourly_aggregation": "", "in_model": "yes",
-                     "description": "Static variable" if "_" not in c else
-                                    f"{c.rsplit('_', 1)[1]} of {c.rsplit('_', 1)[0]} across the 24 hour window"})
+                     "description": desc})
+                     
+    import re
+    log_path = BASE / "outputs" / "logs" / "build_dataset.log"
+    bound_m, bound_e = "", ""
+    if log_path.exists():
+        text = log_path.read_text(encoding="utf-8")
+        m = re.search(r"Clinical artifacts converted to NULL for SAITS imputation: (\d+)", text)
+        if m: bound_m = m.group(1)
+        e = re.search(r"Clinical artifacts converted to NULL for downstream imputation: (\d+)", text)
+        if e: bound_e = e.group(1)
+        if bound_m and bound_e:
+            rows.append({"file": "hourly_observed.csv.gz",
+                         "variable": "[physiological bounds]", "unit": "", "mimic_source": "", "eicu_source": "",
+                         "hourly_aggregation": "", "in_model": "no",
+                         "description": f"Values outside strict physiological limits were converted to NULL before imputation (MIMIC-IV: {bound_m}; eICU-CRD: {bound_e} artifacts removed)."})
+
     return pd.DataFrame(rows)
 
 
 def build_cohort_flow() -> pd.DataFrame:
     rows = []
+    
+    pb_m = PROC_M / "mimic_base_cohort.parquet"
+    if pb_m.exists():
+        rows.append({"source_db": MIMIC, "step": "base ICU cohort (adult, >=24h, non-elective)",
+                     "n_stays": len(pd.read_parquet(pb_m)), "note": ""})
+                     
     att = METRICS / "mimic_phenotype_lock_attrition.json"
     if att.exists():
         a = json.loads(att.read_text(encoding="utf-8"))
@@ -330,11 +356,33 @@ def build_cohort_flow() -> pd.DataFrame:
                          "n_stays": r["n_matched"], "note": "rules overlap, do not sum"})
         rows.append({"source_db": MIMIC, "step": "after phenotype lock",
                      "n_stays": a.get("phenotype_cohort_out"), "note": ""})
+                     
+    pm = PROC_M / "mimic_final_sepsis3_cohort.parquet"
+    if pm.exists():
+        rows.append({"source_db": MIMIC, "step": "final Sepsis-3 adjudication",
+                     "n_stays": len(pd.read_parquet(pm)), "note": ""})
+
+    pb_e = PROC_E / "eicu_base_cohort.parquet"
+    if pb_e.exists():
+        rows.append({"source_db": EICU, "step": "base ICU cohort (adult, >=24h, non-elective)",
+                     "n_stays": len(pd.read_parquet(pb_e)), "note": ""})
+
     cov = METRICS / "eicu_charlson_coverage.json"
     if cov.exists():
         c = json.loads(cov.read_text(encoding="utf-8"))
         rows.append({"source_db": EICU, "step": "confirmed infection cohort",
                      "n_stays": c.get("cohort_stays"), "note": ""})
+                     
+    pe = PROC_E / "eicu_sepsis_phenotype_cohort.parquet"
+    if pe.exists():
+        rows.append({"source_db": EICU, "step": "after phenotype lock",
+                     "n_stays": len(pd.read_parquet(pe)), "note": "mimic exclusion rules evaluated via ICD and text strings"})
+
+    p3e = PROC_E / "eicu_final_sepsis3_cohort.parquet"
+    if p3e.exists():
+        rows.append({"source_db": EICU, "step": "final Sepsis-3 adjudication",
+                     "n_stays": len(pd.read_parquet(p3e)), "note": ""})
+
     return pd.DataFrame(rows)
 
 

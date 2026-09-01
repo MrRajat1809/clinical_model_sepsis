@@ -1,6 +1,7 @@
 # Ignore all raw and processed data
 data/raw/
 data/processed/
+release/
 
 # Ignore all generated pipeline outputs (models, figures, predictions, metrics)
 outputs/

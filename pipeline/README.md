@@ -14,7 +14,7 @@ be peer-reviewed before review.
 ## Title
 
 ```
-ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Physiology Derived from MIMIC-IV and eICU-CRD
+ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Physiology Derived from MIMIC-IV-Ext and eICU-CRD
 ```
 
 ---
@@ -26,6 +26,8 @@ ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with Hourly Physiology Derive
 ```
 
 ---
+
+![Figure 1: Analysis Pipeline](../Figures/Fig1.png)
 
 ## Abstract
 
@@ -255,6 +257,21 @@ are unchanged; rows originating from eICU-CRD are mapped.
 
 ## Usage notes
 
+### Execution workflow
+
+To rebuild the released dataset from the source data, run:
+
+```bash
+bash pipeline/01_build_dataset.sh
+```
+
+The build runs the required dataset construction, harmonisation, and export
+steps in dependency order. The released dataset is written to `release/`, and a
+complete execution log is saved to `outputs/logs/build_dataset.log`.
+
+The build script regenerates the released dataset; it does not reproduce the
+full manuscript analysis.
+
 ### What this resource is useful for
 
 The two cohorts are defined by one specification, so a difference in model
@@ -267,8 +284,6 @@ modelling in sepsis generally.
 Releasing observed values alongside their missingness, rather than an imputed
 matrix alone, is deliberate. Recording density differs markedly between the two
 databases and that difference is itself a research object.
-
-A manuscript describing an analysis built on this resource is in preparation.
 
 ### Known limitations
 
@@ -305,6 +320,34 @@ stays scored zero, suggesting potential undercoding rather than true absence of 
 
 The complete code that constructs this resource, including the exact queries and
 the export script, is available [8]. The source databases are [1] and [2].
+
+---
+
+## Data access
+
+This resource contains data derived from credentialed PhysioNet datasets. Access
+to and use of the released dataset are subject to the PhysioNet Credentialed
+Health Data License 1.5.0 and the PhysioNet Credentialed Health Data Use
+Agreement 1.5.0.
+
+Users must meet the applicable PhysioNet credentialing and data-use requirements
+before accessing or using the credentialed data.
+
+---
+
+## Release Notes
+
+**Version 1.0.0 (Initial Release)**
+
+This is the initial release of the ClinicalTensorSepsis dataset, designed to support cross-database machine learning and transportability research. 
+
+Key inclusions in this release:
+* **Harmonized Sepsis-3 Cohorts**: 20,569 intensive care stays sourced from MIMIC-IV-Ext (12,919 stays) and eICU-CRD (7,650 stays), standardized under a single extraction and adjudication specification.
+* **Hourly Physiological Grid**: 30 clinical variables placed on a shared 24-hour grid originating at Sepsis-3 onset.
+* **Strict Quality Control**: Outliers violating strict biological bounds have been stripped from the raw temporal data (`hourly_observed.csv.gz`).
+* **Deep Learning Imputation**: Includes a completely dense version of the time-series grid (`hourly_imputed.csv.gz`) reconstructed using a SAITS model trained exclusively on the MIMIC-IV development cohort to prevent data leakage.
+* **Domain-Adapted Features**: Includes a summary representation (`features_transported.csv.gz`) aligned via entropic optimal transport for domain adaptation experiments.
+* **Detailed Documentation**: Includes `cohort_flow.csv` and `data_dictionary.csv` detailing exact patient attrition at every step and exact per-variable missingness differences between the source databases.
 
 ---
 
@@ -355,33 +398,44 @@ The author has no conflicts of interest to declare.
 
 ---
 
+## Citation
+
+When using this resource, please cite:
+
+Kumar, P. (2026). *ClinicalTensorSepsis - Harmonised Sepsis-3 Cohorts with
+Hourly Physiology Derived from MIMIC-IV-Ext and eICU-CRD* (version 1.0.0).
+PhysioNet. RRID:SCR_007345.
+
+The resource is currently under review. The permanent DOI will be added after
+publication.
+
+---
+
+## License
+
+The source code in this repository is released under the MIT License. See the
+`LICENSE` file for details.
+
+The MIT License applies to the source code only. The underlying credentialed
+health data remain subject to the applicable PhysioNet license and data-use
+agreement described above.
+
+---
+
 ## References
 
-1. Johnson AEW, Bulgarelli L, Shen L, Gayles A, Shammout A, Horng S, et al.
-   MIMIC-IV a freely accessible electronic health record dataset. Sci Data. 2023;
-   10:1.
+1. Johnson AEW, Bulgarelli L, Shen L, Gayles A, Shammout A, Horng S, et al. MIMIC-IV, a freely accessible electronic health record dataset. Sci Data. 2023;10(1):1. \url{https://doi.org/10.1038/s41597-022-01899-x}.
 
-2. Pollard TJ, Johnson AEW, Raffa JD, Celi LA, Mark RG, Badawi O. The eICU
-   Collaborative Research Database a freely available multi-center database for
-   critical care research. Sci Data. 2018; 5:180178.
+2. Pollard TJ, Johnson AEW, Raffa JD, Celi LA, Mark RG, Badawi O. The eICU Collaborative Research Database, a freely available multi-center database for critical care research. Sci Data. 2018;5:180178. \url{https://doi.org/10.1038/sdata.2018.178}.
 
-3. Singer M, Deutschman CS, Seymour CW, Shankar-Hari M, Annane D, Bauer M, et al.
-   The Third International Consensus Definitions for Sepsis and Septic Shock
-   Sepsis-3. JAMA. 2016; 315:801-810.
+3. Singer M, Deutschman CS, Seymour CW, Shankar-Hari M, Annane D, Bauer M, et al. The third international consensus definitions for sepsis and septic shock (Sepsis-3). JAMA. 2016;315(8):801--10. \url{https://doi.org/10.1001/jama.2016.0287}.
 
-4. Brown SM, Lanspa MJ, Jones JP, Kuttler KG, Li Y, Carlson R, et al. Survival
-   after shock requiring high-dose vasopressor therapy. Chest. 2013;
-   143:664-671.
+4. Brown SM, Lanspa MJ, Jones JP, Kuttler KG, Li Y, Carlson R, et al. Survival after shock requiring high-dose vasopressor therapy. Chest. 2013;143(3):664--71. \url{https://doi.org/10.1378/chest.12-1106}.
 
-5. Du W, Cote D, Liu Y. SAITS self-attention-based imputation for time series.
-   Expert Syst Appl. 2023; 219:119619.
+5. Du W, Côté D, Liu Y. SAITS: self-attention-based imputation for time series. Expert Syst Appl. 2023;219:119619. \url{https://doi.org/10.1016/j.eswa.2023.119619}.
 
-6. Courty N, Flamary R, Tuia D, Rakotomamonjy A. Optimal transport for domain
-   adaptation. IEEE Trans Pattern Anal Mach Intell. 2017; 39:1853-1865.
-  
+6. Courty N, Flamary R, Tuia D, Rakotomamonjy A. Optimal transport for domain adaptation. IEEE Trans Pattern Anal Mach Intell. 2017;39(9):1853--65. \url{https://doi.org/10.1109/TPAMI.2016.2615921}.
 
-7. Quan H, Sundararajan V, Halfon P, Fong A, Burnand B, Luthi JC, et al. Coding
-   algorithms for defining comorbidities in ICD-9-CM and ICD-10 administrative
-   data. Med Care. 2005; 43:1130-1139.
+7. Quan H, Sundararajan V, Halfon P, Fong A, Burnand B, Luthi JC, et al. Coding algorithms for defining comorbidities in ICD-9-CM and ICD-10 administrative data. Med Care. 2005;43(11):1130--9. \url{https://doi.org/10.1097/01.mlr.0000182534.19832.83}.
 
-8. Kumar P. clinical_model_sepsis [Internet]. GitHub; 2026. Available from: https://github.com/MrRajat1809/clinical_model_sepsis
+8. Kumar P. clinical_model_sepsis [Internet]. GitHub; 2026. Available from: \url{https://github.com/MrRajat1809/clinical_model_sepsis}.
